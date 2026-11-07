@@ -36,13 +36,12 @@ def synth(kind: str, rng: np.random.Generator) -> np.ndarray:
     if kind == "tap":                 # blade on ice: a short, dull scrape
         n = int(0.05 * RATE)
         return _lowpass(rng.normal(size=n), 0.35) * _env(n, 0.008) * 1.6
-    if kind == "clack":               # puck off the blade: hard and woody
-        n = int(0.07 * RATE)
+    if kind == "clack":               # puck off the blade: a heavy, dull rubber "thock" (was a light clack)
+        n = int(0.09 * RATE)
         t = np.arange(n) / RATE
-        tone = 0.6 * np.sin(2 * np.pi * 1900 * t) + 0.4 * np.sin(2 * np.pi * 2950 * t)
-        click = np.zeros(n)
-        click[: int(0.002 * RATE)] = rng.normal(size=int(0.002 * RATE))
-        return (tone * _env(n, 0.012) + 0.8 * click) * 0.9
+        body = 0.7 * np.sin(2 * np.pi * 380 * t) + 0.45 * np.sin(2 * np.pi * 690 * t) + 0.2 * np.sin(2 * np.pi * 1150 * t)
+        knock = _lowpass(rng.normal(size=n), 0.25) * _env(n, 0.004)
+        return (body * _env(n, 0.018) + 0.9 * knock) * 0.9
     if kind == "ping":                # off the post
         n = int(0.4 * RATE)
         t = np.arange(n) / RATE

@@ -33,8 +33,9 @@ POST_R = 0.03
 
 @dataclass
 class Params:
-    ice_mu: float = 0.02         # sliding friction on the ice (lower = faster ice)
-    blade_pop: float = 0.30      # restitution off the blade
+    ice_mu: float = 0.05         # sliding friction on the ice (lower = faster ice; 0.02 felt like air hockey)
+    blade_pop: float = 0.20      # restitution off the blade (a frozen rubber puck is dead-ish)
+    puck_mass: float = 0.170     # kg (a regulation puck is 156-170 g; heavier feels heavier)
     blade_grip: float = 0.35     # friction along the blade face (cupping, dragging)
     blade_thickness: float = 0.012
     forgiveness: float = 0.01    # extra reach around the blade for catching the puck (m)
@@ -193,7 +194,8 @@ class Puck:
         vn = float(vrel @ n)
         if vn >= 0:
             return Contact(0.0, Q[i])
-        inv = 1.0 / M + (0.0 if np.isinf(blade_mass) else 1.0 / blade_mass)
+        m = self.params.puck_mass
+        inv = 1.0 / m + (0.0 if np.isinf(blade_mass) else 1.0 / blade_mass)
         e = self.params.blade_pop
         if self.params.soft_hands > 0.5:                  # soft hands: little bounce at stickhandling speeds
             e *= float(np.clip((-vn - 0.5) / (self.params.soft_hands - 0.5), 0.0, 1.0))
@@ -203,11 +205,11 @@ class Puck:
         J = jn * n
         if vt_mag > 1e-9:
             J -= min(vt_mag / inv, self.params.blade_grip * jn) * vt_vec / vt_mag
-        self.vel = self.vel + J / M
+        self.vel = self.vel + J / m
         if self.pos[1] <= H / 2 + 1e-4 and self.vel[1] < 0:
             self.vel[1] = 0.0                            # the ice holds it up
         blade_dv = np.zeros(3) if np.isinf(blade_mass) else -J / blade_mass
-        return Contact(float(jn / M), Q[i], blade_dv)
+        return Contact(float(jn / m), Q[i], blade_dv)
 
     def _rink(self, h: float) -> None:
         rk, pr = self.rink, self.params
@@ -265,12 +267,13 @@ INCH = 0.0254
 LBF = 4.448
 FLEX_SPAN = 1.17          # m between the supports in a flex test (approximate)
 FLEX_LEVER = 0.80         # m from the bottom hand to the blade: the bending cantilever
-ICE_BEND = 0.025          # m: the most the ice may bend the shaft. With no ice pushing back on the hands,
-                          # a stick held low loaded to the 0.15 m limit for free and then fired a resting
-                          # puck at 6 m/s (session 2). Past this the stick slides up through the hands,
-                          # which stores nothing.
-BLADE_MASS = 0.35         # kg: the stick's working mass at the blade, hands included (0.15 made a
-                          # touched blade bounce back and re-hit the puck: "the puck explodes off it")
+ICE_BEND = 0.12           # m: how far the ice may bow the shaft before the stick slides up through the
+                          # hands (Jon: "the top hand slips down"). The bow is drawn but stores NO energy:
+                          # when the ice loaded the flex spring, a stick held low fired a resting puck at
+                          # 6 m/s once it let go (session 2).
+BLADE_MASS = 0.15         # kg: a light composite blade and lower shaft (Jon: "a rubber heavy puck against
+                          # a light flexible composite stick"); the damping keeps it from bouncing back
+                          # into the puck
 
 
 def tip_stiffness(flex: float) -> float:
@@ -290,7 +293,7 @@ class Flex:
 
     MAX_BEND = 0.15
 
-    def __init__(self, flex: float, mass: float = BLADE_MASS, damping: float = 0.70):   # hands damp a stick
+    def __init__(self, flex: float, mass: float = BLADE_MASS, damping: float = 0.60):   # hands damp a stick
         self.mass = mass
         self.damping = damping
         self.set_flex(flex)
@@ -342,26 +345,18 @@ class Sim:
         self.events: list[tuple[str, float]] = []      # ("ice", touchdown speed m/s), drained by the app
 
     def _hold_on_ice(self, bot_rigid: np.ndarray, anchor: np.ndarray, shaft: np.ndarray) -> np.ndarray:
-        """Keep the flexing blade on top of the ice: bend the shaft, and past the flex's limit slide
-        the stick up along its shaft (self.slide). Returns the bend."""
-        f = self.flex
-        bend = f.bend(anchor)
+        """Keep the blade on top of the ice WITHOUT storing energy: the flex (driven by the hands'
+        motion) is left alone; on top of it the shaft bows (energy-free) up to ICE_BEND, and only
+        past that does the stick slide up through the hands (self.slide). Returns the total bend."""
+        bend = self.flex.bend(anchor)
         low = float((bot_rigid[:, 1] + bend[1]).min())
         self.slide = np.zeros(3)
         if low < 0:
-            new, self.slide = ice_rest(bend, low, shaft, ICE_BEND)
-            dv = new - bend
-            dn = float(np.linalg.norm(dv))
-            if dn > 1e-9:
-                dd = dv / dn
-                vd = float(f.v @ dd)
-                if vd < 0:                                  # stop it moving into the ice
-                    f.v = f.v - dd * vd
+            total, self.slide = ice_rest(bend, low, shaft, ICE_BEND)
             if not self.on_ice:                             # touchdown
-                self.events.append(("ice", max(0.0, float(-f.v[1]))))
+                self.events.append(("ice", max(0.0, float(-self.flex.v[1]))))
                 self.on_ice = True
-            f.x = anchor + new
-            return new
+            return total
         if low > 0.003:                                     # clearly lifted off
             self.on_ice = False
         return bend
@@ -393,6 +388,7 @@ class Sim:
             self.flex.step(h, a_s, v_anchor, shaft)
             bot_r = b0 + s * (rigid_bot - b0)
             bend = self._hold_on_ice(bot_r, a_s, shaft) if self.flex.x is not None else np.zeros(3)
+            total_bend = bend
             dv_bend = self.flex.v - v_anchor
             bot = bot_r + bend + self.slide
             top = t0 + s * (rigid_top - t0) + bend + self.slide
@@ -404,7 +400,7 @@ class Sim:
                     biggest = max(biggest, c.impulse)
                     self.flex.v = self.flex.v + c.blade_dv          # the hit bends the blade back
             p._rink(h)
-        self.bend = self.flex.bend(anchor)
+        self.bend = total_bend                              # the flex plus the ice's bow, at the step's end
         self._last = (rigid_bot, rigid_top, anchor)
         return biggest
 

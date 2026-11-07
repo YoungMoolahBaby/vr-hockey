@@ -16,7 +16,7 @@ Controls
   A                             save the settings (sandbox_settings.json, used next time)
 
 Settings: stick length, lie, curve depth, face open, flex, forgiveness (extra reach for catching
-the puck), ice friction, blade pop, blade grip, buzz strength.
+the puck), puck weight, ice friction, blade pop, blade grip, buzz strength.
 
 The puck physics (puck.py) runs at 1 kHz, four substeps per controller sample, with the blade
 flexing on the shaft. The ice holds the blade up: push lower and the shaft bends (and loads)
@@ -82,6 +82,7 @@ SETTINGS = (
     Setting("face_open", "face open", 1, -10, 25, "{:.0f} degrees"),
     Setting("flex", "flex", 5, 30, 120, "{:.0f}"),
     Setting("forgive_cm", "forgiveness", 0.5, 0.0, 4.0, "{:g} centimetres"),
+    Setting("puck_g", "puck weight", 10, 100, 400, "{:.0f} grams"),
     Setting("ice_mu", "ice friction", 0.005, 0.0, 0.1, "{:.3f}"),
     Setting("pop", "blade pop", 0.05, 0.0, 0.9, "{:.2f}"),
     Setting("grip", "blade grip", 0.05, 0.0, 1.0, "{:.2f}"),
@@ -100,7 +101,7 @@ class Tuning:
         return {"length_in": spec.length_m / INCH, "lie": spec.lie, "curve_in": spec.curve_depth_m / INCH,
                 "face_open": spec.face_open_deg, "flex": spec.flex, "roll": fit.roll_deg, "pitch": fit.pitch_deg,
                 "yaw": fit.yaw_deg, "ice_mu": params.ice_mu, "pop": params.blade_pop, "grip": params.blade_grip,
-                "buzz": 0.6, "forgive_cm": params.forgiveness * 100}
+                "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000}
 
     def spec(self) -> stickspec.StickSpec:
         v = self.values
@@ -115,6 +116,7 @@ class Tuning:
         params.blade_pop = self.values["pop"]
         params.blade_grip = self.values["grip"]
         params.forgiveness = self.values["forgive_cm"] / 100
+        params.puck_mass = self.values["puck_g"] / 1000
 
     @property
     def current(self) -> Setting:
@@ -325,7 +327,7 @@ class Physics:
             if kind == "ice" and speed > 0.15:
                 pl.sounds.put(("tap", float(np.clip(speed / 2.0, 0, 1))))
                 if hands_now and buzz_level > 0:
-                    pl.haptics.put((0.12 * buzz_level + 0.05, hands_now))
+                    pl.haptics.put((0.12 * buzz_level + 0.05, hands_now, 10))
         sim.events.clear()
         if imp > 0.3:
             pl.sounds.put(("clack", float(np.clip(imp / 8.0, 0, 1))))
@@ -334,9 +336,10 @@ class Physics:
         if imp > 0.15 and (t - self.last_buzz > 0.02 or imp > 3.0):
             self.last_buzz = t
             amp = float(np.clip(imp / 6.0, 0.08, 1.0)) * self.play.tuning.values["buzz"]
+            ms = 12 + 25 * float(np.clip(imp / 6.0, 0, 1))      # a harder hit lasts longer (a heavy puck)
             hands = [spec.top_hand if h == "top" else spec.bottom_hand for h in HOLDERS.get(state, ())]
             if amp > 0 and hands:
-                pl.haptics.put((amp, hands))
+                pl.haptics.put((amp, hands, ms))
         # shots: a hard contact, then call the speed once it's away
         if imp > 2.0 and pz.speed > 6.0:
             if self.shot is None:
@@ -354,7 +357,7 @@ class Physics:
             self.log.event(t, kind, ms=round(speed, 2))
             if kind == "goal":
                 self.voice.say(f"Goal! {pz.goals}", key="goal")
-                pl.haptics.put((1.0, [spec.top_hand, spec.bottom_hand]))
+                pl.haptics.put((1.0, [spec.top_hand, spec.bottom_hand], 80))
                 self.respawn_at = t + 2.0
             elif kind == "post" and speed > 2:
                 self.voice.say("Post!", key="post")
@@ -676,11 +679,12 @@ def run(args, play: Play, run_dir: Path) -> None:
                 sounds.play_most_important(snd)
                 buzz: dict = {}
                 while not play.haptics.empty():
-                    amp, hands = play.haptics.get_nowait()
+                    amp, hands, ms = play.haptics.get_nowait()
                     for h in hands:
-                        buzz[h] = max(buzz.get(h, 0.0), amp)
-                for h, amp in buzz.items():
-                    inputs.buzz(h, amp, 15)
+                        a0, m0 = buzz.get(h, (0.0, 0.0))
+                        buzz[h] = (max(a0, amp), max(m0, ms))
+                for h, (amp, ms) in buzz.items():
+                    inputs.buzz(h, amp, ms)
 
                 held = {top: dgrab.on["t"], bot: dgrab.on["b"]}
                 verts = scene(play, play.sim.puck.rink, poses, held, (R, p), state)

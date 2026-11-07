@@ -39,7 +39,8 @@ def touches(run_dir, overrides: dict | None = None, until_s: float | None = None
     run_dir = Path(run_dir)
     df, meta = recfmt.load(run_dir)
     spec = StickSpec.from_dict(meta["spec"])
-    values = dict(meta["settings_end"])
+    values = sandbox.Tuning.defaults(spec, grab.Fit.from_dict(meta["fit"]), pk.Params())
+    values.update(meta["settings_end"])                 # older sessions lack newer settings
     values.update(overrides or {})
     play = sandbox.Play(sandbox.Tuning(spec.with_(length_m=spec.length_m), values))
     play.retune()

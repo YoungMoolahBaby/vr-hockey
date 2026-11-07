@@ -141,3 +141,20 @@ def test_curve_depth_is_the_gap_to_a_straight_edge():
         n = np.array([-chord[1], chord[0]]) / np.linalg.norm(chord)
         gap = np.max(np.abs((e - e[0]) @ n))
         assert gap == pytest.approx(depth_in * stickspec.INCH, rel=0.01)
+
+
+def test_the_shaft_runs_through_both_hands():
+    """Grab with the bottom hand 6 cm off the shaft: the stick turns so its axis passes through it."""
+    fit, R_s, p_s, Rt, pt, Rb, pb = _session(400)
+    off = np.cross(SPEC.u, [0.0, 0.0, 1.0])
+    off /= np.linalg.norm(off)
+    pb = pb + np.einsum("nij,j->ni", R_s, 0.06 * off)       # the bottom hand beside the shaft
+    n = len(R_s)
+    state = grab.states(np.ones(n, bool), np.ones(n, bool))
+    ok = np.ones(n, bool)
+    R, p = grab.replay(SPEC, fit, state, Rt, pt, Rb, pb, ok, ok)
+    for i in (200, 399):                                    # after the ease-in
+        axis = R[i] @ SPEC.u
+        to_b = pb[i] - (p[i] + R[i] @ SPEC.grip)
+        miss = np.linalg.norm(to_b - (to_b @ axis) * axis)
+        assert miss < 1e-6, i

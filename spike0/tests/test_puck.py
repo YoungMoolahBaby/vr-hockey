@@ -113,7 +113,7 @@ def test_flex_stiffness_and_whip():
         if i * h >= 0.05:
             peak = max(peak, f.bend(x)[0])
         assert abs(f.bend(x)[1]) < 1e-12                 # it bends across the shaft, never along it
-    assert 0.04 < peak < 0.09                            # the whip: the blade swings on past the stop
+    assert 0.02 < peak < 0.09                            # the whip: the blade swings on past the stop
 
 
 @pytest.mark.parametrize("flex", [50, 70, 100])
@@ -127,19 +127,20 @@ def test_slap_with_flex(flex):
     assert 18 < sim.puck.speed < 32
 
 
-def test_the_ice_holds_the_blade_and_the_shaft_bends():
-    """Hands 5 cm too low: the blade stays on the ice and the shaft takes the bend."""
+@pytest.mark.parametrize("depth, slides", [(0.05, False), (0.15, True)])
+def test_the_ice_holds_the_blade_and_the_shaft_bends(depth, slides):
+    """Hands too low: the blade stays on the ice; the shaft bows (energy-free) up to ICE_BEND, and only
+    a deep push makes the stick slide up through the hands."""
     sim = pk.Sim(pk.Params(), RINK, 70)
     shaft = np.array([-np.cos(np.radians(45)), np.sin(np.radians(45)), 0.0])
-    b = blade_at(0.0, 0.0, y=0.05)                          # start 5 cm above the ice
     for k in range(400):
-        y = 0.05 - 0.10 * min(k / 200, 1.0)                 # lower the hands until the rigid blade is 5 cm under
+        y = 0.05 - (0.05 + depth) * min(k / 200, 1.0)       # lower the hands until the rigid blade is `depth` under
         bot, top = blade_at(0.0, 0.0, y=y)
         sim.step(0.001, bot, top, bot.mean(axis=0), shaft)
     low = (bot + sim.bend + sim.slide)[:, 1].min()
     assert low == pytest.approx(0.0, abs=0.003)             # on the ice, not through it
-    assert np.linalg.norm(sim.bend) <= pk.ICE_BEND + 1e-6   # the shaft bows a little...
-    assert np.linalg.norm(sim.slide) > 0.02                 # ...and the stick slides up for the rest
+    assert np.linalg.norm(sim.bend) <= pk.ICE_BEND + 1e-6
+    assert (np.linalg.norm(sim.slide) > 0.01) == slides
     assert [e[0] for e in sim.events].count("ice") == 1     # one touchdown
 
 

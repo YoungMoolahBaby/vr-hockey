@@ -161,6 +161,12 @@ def rot_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.eye(3) + K + (K @ K) * k[..., None, None]
 
 
+def on_shaft(spec: StickSpec, q: np.ndarray) -> np.ndarray:
+    """The bottom hand's grab point moved onto the shaft's axis, so the shaft runs through both
+    hands (Jon: "the bottom hand grip a bit off from the shaft"). Easing in hides the move."""
+    return float(q @ spec.u) * spec.u
+
+
 def top_pose(R_ts, p_ts, Rt, pt):
     return Rt @ R_ts, pt + Rt @ p_ts
 
@@ -206,7 +212,7 @@ def replay(spec: StickSpec, fit: Fit, state, Rt, pt, Rb, pb, valid_t, valid_b, t
                 bad = ~valid_t[sl]
             else:
                 R0, p0 = top_pose(R_ts, p_ts, Rt[i0], pt[i0])
-                q_b = R0.T @ (pb[i0] - p0)                # where the bottom hand took the stick
+                q_b = on_shaft(spec, R0.T @ (pb[i0] - p0))   # where the bottom hand took the stick
                 R[sl], p[sl] = both_pose(R_ts, p_ts, q_b, Rt[sl], pt[sl], pb[sl])
                 bad = ~(valid_t[sl] & valid_b[sl])
             # ease in: start from where the stick was (carried by the top hand), not a jump
@@ -277,7 +283,7 @@ class Grab:
         elif new == BOTH and top is not None and bottom is not None:
             if self.state != BOTH or self.q_b is None:
                 R0, p0 = top_pose(self.R_ts, self.p_ts, *top)
-                self.q_b = R0.T @ (bottom[1] - p0)
+                self.q_b = on_shaft(self.spec, R0.T @ (bottom[1] - p0))
             R, p = both_pose(self.R_ts, self.p_ts, self.q_b, top[0][None], top[1][None], bottom[1][None])
             self.R, self.p = R[0], p[0]
         elif new in RIDES and self.R is not None:
