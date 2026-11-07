@@ -27,6 +27,7 @@ PUCK_H_MM = 25.4
 PUCK_D_MM = 76.2
 FRAME_RATES = (72, 90, 120)
 JITTER_WINDOW_S = 0.05
+SHOT_MIN_SPEED = 8.0     # m/s at the blade: slower peaks are stick movements, not shots
 STICK_PHASES = ("stickhandle", "heads_up", "one_hand")
 SHOT_PHASES = ("wrist_shots", "slap_shots")
 EXPECTED = {"stickhandle": (grab.BOTH,), "heads_up": (grab.BOTH,), "one_hand": (grab.BOTTOM, grab.LOOSE_BOTTOM),
@@ -207,15 +208,15 @@ def analyze(run_dir, make_plots: bool = True) -> dict:
             idx = np.flatnonzero(masks[ph])
             tt = t[idx]
             spd = fd_speed(sweet[idx], tt)
-            # only real swings: both hands holding, and not within 50 ms of a grab or release (the
-            # stick jumps into the hand then, which is not a swing)
+            # only real swings: the stick in a hand (gripped or riding loose), and not within 50 ms
+            # of a grab or release (the stick can jump into the hand then, which is not a swing)
             st = state[idx].astype(int)
             near_change = np.zeros(len(idx), bool)
             k = int(0.05 * rate_hz)
             for c in np.flatnonzero(np.diff(st)) + 1:
                 near_change[max(0, c - k):c + k] = True
-            spd[(st != grab.BOTH) | near_change] = np.nan
-            peaks = pick_peaks(tt, spd)
+            spd[~np.isin(st, grab.HELD) | near_change] = np.nan
+            peaks = pick_peaks(tt, spd, min_speed=SHOT_MIN_SPEED)
             shots = []
             for i in peaks:
                 near = (tt >= tt[i] - 0.02) & (tt <= tt[i] + 0.02)

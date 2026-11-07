@@ -50,6 +50,9 @@ class StickSpec:
     blade_len_m: float
     blade_h_m: float
     curve_depth_m: float
+    curve_shape: float = 2.5      # exponent: 1 = even heel-to-toe, 2.5 = mid-toe, 4 = toe curve
+    face_open_deg: float = 4.0    # how far the face opens (tilts back) by the toe; P92 is slightly open
+    flex: float = 70.0            # stick flex rating: lbs to bend the shaft 1 inch (higher = stiffer)
 
     # ------------------------------------------------------------------ derived geometry
     @property
@@ -80,13 +83,18 @@ class StickSpec:
         return (self.length_m - self.grip_from_top_m) * self.u
 
     def blade_z(self, x):
-        """Curve: the toe curls toward the forehand, deepest at the toe (mid-toe pattern)."""
-        return self.z_forehand[2] * self.curve_depth_m * (np.asarray(x) / self.blade_len_m) ** 2
+        """Curve: the toe curls toward the forehand; curve_shape sets where the bend sits."""
+        return self.z_forehand[2] * self.curve_depth_m * (np.asarray(x) / self.blade_len_m) ** self.curve_shape
 
-    def edge(self, n: int = 12, top: bool = False) -> np.ndarray:
-        """(n, 3) points along the blade's bottom (or top) edge, heel to toe."""
+    def edge(self, n: int = 12, top: bool = False, frac: float | None = None) -> np.ndarray:
+        """(n, 3) points along the blade heel to toe: the bottom edge, the top edge, or a line at
+        `frac` of the blade's height. The face opens (the top tilts back from the forehand) toward
+        the toe."""
+        f = (1.0 if top else 0.0) if frac is None else frac
         x = np.linspace(0, self.blade_len_m, n)
-        return np.stack([x, np.full(n, self.blade_h_m if top else 0.0), self.blade_z(x)], axis=1)
+        open_rad = np.radians(self.face_open_deg) * (x / self.blade_len_m)
+        z = self.blade_z(x) - self.z_forehand[2] * f * self.blade_h_m * np.tan(open_rad)
+        return np.stack([x, np.full(n, f * self.blade_h_m), z], axis=1)
 
     @property
     def heel(self) -> np.ndarray:
@@ -107,14 +115,22 @@ class StickSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> "StickSpec":
-        return cls(**d)
+        names = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in names})     # older files lack newer fields
+
+    def with_(self, **changes) -> "StickSpec":
+        d = self.to_dict()
+        d.update(changes)
+        if "lie" in changes:
+            d["shaft_angle_deg"] = 45.0 + 2.0 * (d["lie"] - 5.0)
+        return StickSpec(**d)
 
 
 def from_height(height_m: float, shoots: str = "left", lie: float = 5.0, length_m: float | None = None,
-                curve_depth_m: float = 0.5 * INCH) -> StickSpec:
+                curve_depth_m: float = 0.5 * INCH, flex: float = 70.0) -> StickSpec:
     if shoots not in ("left", "right"):
         raise ValueError(shoots)
     length = length_m if length_m else 0.84 * height_m
     return StickSpec(shoots=shoots, height_m=height_m, length_m=float(length), lie=lie,
                      shaft_angle_deg=45.0 + 2.0 * (lie - 5.0), grip_from_top_m=0.07,
-                     blade_len_m=0.29, blade_h_m=0.075, curve_depth_m=curve_depth_m)
+                     blade_len_m=0.29, blade_h_m=0.075, curve_depth_m=curve_depth_m, flex=flex)

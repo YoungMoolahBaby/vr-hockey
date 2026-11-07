@@ -198,6 +198,12 @@ class Grab:
         self.fit = fit
         self.R_ts, self.p_ts = hold(self.spec, fit)
 
+    def configure(self, spec: StickSpec, fit: Fit) -> None:
+        """A new stick or fit (live tuning): a gripped stick takes it at the next step, a loose one
+        at the next grab."""
+        self.spec = spec
+        self.set_fit(fit)
+
     def _held(self, key, v):
         self.on[key] = v >= SQUEEZE_ON if not self.on[key] else v > SQUEEZE_OFF
         return self.on[key]

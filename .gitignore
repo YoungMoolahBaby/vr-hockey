@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 spike0/data/
 spike0/stick_fit.json
+spike0/sandbox_settings.json

@@ -137,6 +137,7 @@ class Sampler(threading.Thread):
         self.n = 0
         self.errors = 0
         self.writer = threading.Thread(target=self._write_loop, args=(csv_path,), daemon=True, name="writer")
+        self.on_tick = None      # optional: on_tick(t_s, {dev: (R, p) or None}) after each sample (the sandbox physics)
         self.qpc_freq = wintypes.LARGE_INTEGER()
         ctypes.windll.kernel32.QueryPerformanceFrequency(ctypes.byref(self.qpc_freq))
         # reusable output structs: location -> velocity chain for controllers, plain for the head
@@ -176,6 +177,7 @@ class Sampler(threading.Thread):
             t_s = (qpc.value - qpc0) / freq
             xt = xr.convert_win32_performance_counter_to_time_khr(self.inst, qpc).value - self.lag_ns
             row = [round(t_s, 6), xt, sh.phase]
+            tick = {}
             for dev, space, loc, vel in zip(recfmt.CONTROLLERS, self.ctrl_spaces, self.loc, self.vel):
                 squeeze = round(sh.squeeze[dev], 3)
                 if self._locate(space, loc, xt):
@@ -187,6 +189,9 @@ class Sampler(threading.Thread):
                             vel._velocity_flags, round(lv.x, 5), round(lv.y, 5), round(lv.z, 5),
                             round(av.x, 5), round(av.y, 5), round(av.z, 5), squeeze]
                     sh.latest_flags[dev] = f
+                    if self.on_tick is not None and (f & NEED_POSE) == NEED_POSE:
+                        tick[dev] = (stickmath.quat_to_mat(np.array([po.x, po.y, po.z, po.w])),
+                                     np.array([pp.x, pp.y, pp.z]))
                 else:
                     row += [0] * (len(recfmt.CTRL_FIELDS) - 1) + [squeeze]
                     sh.latest_flags[dev] = 0
@@ -200,6 +205,8 @@ class Sampler(threading.Thread):
             self.buf.append(row)
             self.n += 1
             sh.t_now = t_s
+            if self.on_tick is not None:
+                self.on_tick(t_s, tick)
             next_t += self.period
             delay = next_t - time.perf_counter()
             if delay > 0:
@@ -333,12 +340,20 @@ class Inputs:
         self.thumb = make("thumbstick", A.VECTOR2F_INPUT, right)
         self.a = make("a_button", A.BOOLEAN_INPUT, right)
         self.b = make("b_button", A.BOOLEAN_INPUT, right)
+        left = [self.hand["l"]]
+        self.x = make("x_button", A.BOOLEAN_INPUT, left)
+        self.y = make("y_button", A.BOOLEAN_INPUT, left)
+        self.lthumb = make("left_thumbstick", A.VECTOR2F_INPUT, left)
+        self.lclick = make("left_thumbstick_click", A.BOOLEAN_INPUT, left)
         self.haptic = make("haptic", A.VIBRATION_OUTPUT, both)
         pairs = [(self.pose, "/user/hand/left/input/grip/pose"), (self.pose, "/user/hand/right/input/grip/pose"),
                  (self.squeeze, "/user/hand/left/input/squeeze/value"),
                  (self.squeeze, "/user/hand/right/input/squeeze/value"),
                  (self.thumb, "/user/hand/right/input/thumbstick"),
                  (self.a, "/user/hand/right/input/a/click"), (self.b, "/user/hand/right/input/b/click"),
+                 (self.x, "/user/hand/left/input/x/click"), (self.y, "/user/hand/left/input/y/click"),
+                 (self.lthumb, "/user/hand/left/input/thumbstick"),
+                 (self.lclick, "/user/hand/left/input/thumbstick/click"),
                  (self.haptic, "/user/hand/left/output/haptic"), (self.haptic, "/user/hand/right/output/haptic")]
         bindings = (xr.ActionSuggestedBinding * len(pairs))(
             *[xr.ActionSuggestedBinding(act, xr.string_to_path(inst, path)) for act, path in pairs])
@@ -359,7 +374,8 @@ class Inputs:
 
     def read(self) -> dict:
         s = self.ctx.session
-        out = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False}
+        out = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False,
+               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False}
         try:
             for d in ("l", "r"):
                 st = xr.get_action_state_float(s, self._info(self.squeeze, d))
@@ -368,6 +384,11 @@ class Inputs:
             out["thumb"] = (v.current_state.x, v.current_state.y) if v.is_active else (0.0, 0.0)
             out["a"] = bool(xr.get_action_state_boolean(s, self._info(self.a, "r")).current_state)
             out["b"] = bool(xr.get_action_state_boolean(s, self._info(self.b, "r")).current_state)
+            out["x"] = bool(xr.get_action_state_boolean(s, self._info(self.x, "l")).current_state)
+            out["y"] = bool(xr.get_action_state_boolean(s, self._info(self.y, "l")).current_state)
+            v = xr.get_action_state_vector2f(s, self._info(self.lthumb, "l"))
+            out["lthumb"] = (v.current_state.x, v.current_state.y) if v.is_active else (0.0, 0.0)
+            out["lclick"] = bool(xr.get_action_state_boolean(s, self._info(self.lclick, "l")).current_state)
         except xr.XrException:
             pass
         return out
