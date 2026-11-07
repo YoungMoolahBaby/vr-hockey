@@ -58,12 +58,19 @@ def test_heel_velocity_matches_numerical_derivative():
         assert err < 0.01, f"{model}: {err:.4f} m/s"
 
 
-def test_move_noise_without_noise_is_identity():
-    R = np.repeat(synth.expmap(np.array([[0.3, -0.2, 0.9]])), 20, axis=0)
-    p = np.tile([0.4, 0.75, -0.6], (20, 1))
-    to_R, to_p = synth.expmap(np.array([[1.0, 0.5, -0.2]]))[0], np.array([-0.5, 1.1, 0.2])
-    Rn, pn = sm.move_noise(R, p, to_R, to_p)
-    assert np.allclose(Rn, to_R) and np.allclose(pn, to_p)
+def test_flat_grip_line_still_puts_the_heel_on_the_ice():
+    """Real hands (2026-11-07): grips 35 cm apart on a line only ~28 deg down, top grip ~0.98 m up.
+    The stick must still be DEFAULT_LENGTH long with its heel on the ice, hanging at ~44 deg."""
+    n = 50
+    pt = np.tile([0.0, 0.98, 0.0], (n, 1))
+    line = sm.unit(np.array([-np.cos(np.radians(28)), -np.sin(np.radians(28)), 0.1]))
+    pb = pt + 0.35 * line
+    R = np.repeat(np.eye(3)[None], n, axis=0)
+    cal = sm.calibrate_stance(R, pt, R, pb, "r")
+    assert cal.length_m == sm.DEFAULT_LENGTH and not sm.stance_problems(cal, 0.0)
+    assert cal.shaft_angle_deg == pytest.approx(np.degrees(np.arcsin(0.98 / 1.40)), abs=0.01)
+    for model in sm.MODELS:
+        assert np.allclose(sm.blade_heel(model, cal, R, pt, R, pb)[:, 1], 0.0, atol=1e-9), model
 
 
 @pytest.fixture(scope="module")
@@ -89,7 +96,7 @@ def test_noise_rate_and_height(run):
         assert S["controllers"][d]["hand"] == T["hand"]
     for model, T in truth["models"].items():
         M = S["models"][model]
-        assert M["rest_heel_std_mm"] == pytest.approx(T["rest_heel_std_mm"], rel=0.15), model
+        assert M["hold_heel_std_mm"] == pytest.approx(T["hold_heel_std_mm"], rel=0.15), model
         assert M["stickhandle"]["height_median_mm"] == pytest.approx(T["stickhandle_height_median_mm"], abs=3.0), model
 
 

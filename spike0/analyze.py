@@ -28,7 +28,6 @@ JITTER_WINDOW_S = 0.05
 # my heuristics for "steady enough to handle a virtual puck" (mm, %)
 THRESHOLDS = {
     #  metric                    good   ok     higher_is_better
-    "rest_heel_std_mm":         (3.0,  8.0,   False),
     "hold_heel_std_mm":         (6.0,  15.0,  False),
     "jitter_mm":                (3.0,  8.0,   False),
     "on_ice_pct":               (90.0, 70.0,  True),
@@ -36,7 +35,7 @@ THRESHOLDS = {
     "shot_tracked_pct":         (99.0, 90.0,  True),
 }
 RATING_WORD = {"good": "GO", "ok": "MARGINAL", "bad": "NO-GO"}
-MODEL_METRICS = ("rest_heel_std_mm", "hold_heel_std_mm", "jitter_mm", "on_ice_pct")
+MODEL_METRICS = ("hold_heel_std_mm", "jitter_mm", "on_ice_pct")
 TRACK_METRICS = ("heads_up_tracked_pct", "shot_tracked_pct")
 
 
@@ -149,12 +148,6 @@ def analyze(run_dir, make_plots: bool = True) -> dict:
         C["fresh_pose_hz"] = float(ch.sum() / max(1e-9, tr.valid.mean() * dur))
         C["valid_pct"] = float(tr.valid.mean() * 100)
         C["tracked_pct"] = float(tr.tracked.mean() * 100)
-        if "rest" in masks:
-            m = middle(masks["rest"]) & tr.valid
-            if m.sum() > 100:
-                C["rest_pos_std_mm"] = float(np.sqrt(np.sum(np.var(tr.p[m], axis=0))) * 1000)
-                dR = sm.mean_rotation(tr.R[m]).T @ tr.R[m]
-                C["rest_rot_rms_deg"] = float(np.sqrt(np.mean(sm.rotation_angle_deg(dR) ** 2)))
         for ph in ("stickhandle", "heads_up"):
             if ph not in masks:
                 continue
@@ -196,6 +189,20 @@ def analyze(run_dir, make_plots: bool = True) -> dict:
     else:
         S["stick"] = {"problems": ["no stance phase in this run"]}
 
+    # the stick the headset drew is the last fit the recorder accepted; if that is not this fit
+    # (an older recorder, or another --stick-length), you were steering a different stick
+    if cal is not None:
+        shown = None
+        for lab, c in (meta.get("online_calibration") or {}).items():
+            if base(lab) == "stance" and c.get("stick"):
+                shown = c["stick"]
+        if shown and (abs(shown["length_m"] - cal.length_m) > 0.05
+                      or abs(shown["shaft_angle_deg"] - cal.shaft_angle_deg) > 5):
+            S["display_mismatch"] = (
+                f"the headset showed a {shown['length_m']:.2f} m stick at {shown['shaft_angle_deg']:.0f} deg "
+                f"(an older fit), not this {cal.length_m:.2f} m stick at {cal.shaft_angle_deg:.0f} deg, so the "
+                "blade-height numbers show you steering a different stick")
+
     heels: dict[str, np.ndarray] = {}
     if cal is not None:
         T, B = tracks[cal.top], tracks[cal.bottom]
@@ -203,21 +210,11 @@ def analyze(run_dir, make_plots: bool = True) -> dict:
         S["controllers"][cal.top]["hand"] = "top"
         S["controllers"][cal.bottom]["hand"] = "bottom"
         st = middle(masks["stance"]) & both
-        Rt_s, pt_s = sm.mean_rotation(T.R[st]), T.p[st].mean(axis=0)
-        Rb_s, pb_s = sm.mean_rotation(B.R[st]), B.p[st].mean(axis=0)
         for model in sm.MODELS:
             M = S["models"][model] = {}
             heel = sm.blade_heel(model, cal, T.R, T.p, B.R, B.p)
             heel[~both] = np.nan
             heels[model] = heel
-            # pure tracking noise: the rest-phase jitter of each controller, carried onto the stance
-            if "rest" in masks:
-                rm = middle(masks["rest"]) & both
-                if rm.sum() > 100:
-                    Rt_n, pt_n = sm.move_noise(T.R[rm], T.p[rm], Rt_s, pt_s)
-                    Rb_n, pb_n = sm.move_noise(B.R[rm], B.p[rm], Rb_s, pb_s)
-                    hn = sm.blade_heel(model, cal, Rt_n, pt_n, Rb_n, pb_n)
-                    M["rest_heel_std_mm"] = float(np.sqrt(np.sum(np.var(hn, axis=0))) * 1000)
             # holding still in the stance: tracking plus the tremor of real hands
             M["hold_heel_std_mm"] = float(np.sqrt(np.sum(np.nanvar(heel[st], axis=0))) * 1000)
             for ph in ("stickhandle", "heads_up"):
@@ -288,13 +285,13 @@ def analyze(run_dir, make_plots: bool = True) -> dict:
     order = {"good": 0, "ok": 1, "bad": 2}
     rank = {}
     for model, M in S["models"].items():
-        m = {"rest_heel_std_mm": M.get("rest_heel_std_mm"), "hold_heel_std_mm": M.get("hold_heel_std_mm"),
+        m = {"hold_heel_std_mm": M.get("hold_heel_std_mm"),
              "jitter_mm": M.get("stickhandle", {}).get("jitter_mm"),
-             "on_ice_pct": M.get("stickhandle", {}).get("near_ice_pct")}
+             "on_ice_pct": None if S.get("display_mismatch") else M.get("stickhandle", {}).get("near_ice_pct")}
         r = {k: rate(k, v) for k, v in m.items()}
         w = worst(r.values())
         S["verdict"][model] = {"overall": RATING_WORD[w], "metrics": m, "ratings": r}
-        rank[model] = (order[w], M.get("rest_heel_std_mm") or 1e9)
+        rank[model] = (order[w], M.get("hold_heel_std_mm") or 1e9)
     S["verdict"]["recommended_model"] = min(rank, key=rank.get) if rank else None
     if cal is None or S["stick"].get("problems"):
         S["verdict"]["stick_fit"] = "check: " + "; ".join(S["stick"].get("problems", []))
@@ -337,9 +334,11 @@ def render_markdown(S: dict) -> str:
     st = S["stick"]
     L.append("## The stick, fitted to your stance\n")
     if "length_m" in st:
-        L.append(f"{hand[st['top']]} hand on top; {st['length_m']:.2f} m from the top grip to the heel"
-                 f"{' (fixed by --stick-length)' if st['length_fixed'] else ''}; hands {st['hand_sep_m'] * 100:.0f} cm "
-                 f"apart; shaft {st['shaft_angle_deg']:.0f} deg below horizontal."
+        L.append(f"{hand[st['top']]} hand on top. Stick {st['length_m']:.2f} m from the top grip to the heel "
+                 f"({'from --stick-length' if st['length_fixed'] else 'the default; pass --stick-length for your own'}). "
+                 f"Top grip {st['top_height_m']:.2f} m above the ice, hands {st['hand_sep_m'] * 100:.0f} cm apart. "
+                 f"The line between your grips points {st['grip_line_deg']:.0f} deg down; the stick hangs at "
+                 f"{st['shaft_angle_deg']:.0f} deg to reach the ice."
                  + (f" **Check:** {'; '.join(st['problems'])}." if st["problems"] else ""))
     else:
         L.append(f"No stick: {'; '.join(st.get('problems', []))}.")
@@ -351,35 +350,37 @@ def render_markdown(S: dict) -> str:
              f"{rated(tv['metrics']['heads_up_tracked_pct'], tv['ratings']['heads_up_tracked_pct'], 1, '%')}, "
              f"in swings {rated(tv['metrics']['shot_tracked_pct'], tv['ratings']['shot_tracked_pct'], 1, '%')}.\n")
     if S["models"]:
-        L.append("| stick model | verdict | blade noise, controllers at rest | holding still (with tremor) | "
+        L.append("| stick model | verdict | holding still (your hands + tracking) | "
                  "jitter while stickhandling | blade near the ice while stickhandling |")
-        L.append("|---|---|---|---|---|---|")
+        L.append("|---|---|---|---|---|")
         shown = m.get("show_model") or "two_hand"
         for model in S["models"]:
             mv = V[model]
             tags = [x for x, c in (("recommended", model == V.get("recommended_model")),
                                    ("shown in the headset", model == shown)) if c]
             L.append(f"| {model}{' (' + ', '.join(tags) + ')' if tags else ''} | **{mv['overall']}** | "
-                     f"{rated(mv['metrics']['rest_heel_std_mm'], mv['ratings']['rest_heel_std_mm'])} | "
                      f"{rated(mv['metrics']['hold_heel_std_mm'], mv['ratings']['hold_heel_std_mm'])} | "
                      f"{rated(mv['metrics']['jitter_mm'], mv['ratings']['jitter_mm'])} | "
                      f"{rated(mv['metrics']['on_ice_pct'], mv['ratings']['on_ice_pct'], 0, '%')} |")
+    if S.get("display_mismatch"):
+        L.append(f"\n**Blade height is left out of the verdict:** {S['display_mismatch']}.")
     L.append(f"\nFor scale: the puck is {PUCK_H_MM} mm tall and {PUCK_D_MM} mm wide.\n")
 
     L.append("## Controllers\n")
-    L.append("| controller | hand | fresh poses | at rest: position / rotation | stickhandle tracked | "
+    L.append("| controller | hand | fresh poses | stickhandle tracked | "
              "heads-up tracked | longest heads-up gap | tracked by gaze angle (heads-up) |")
-    L.append("|---|---|---|---|---|---|---|---|")
+    L.append("|---|---|---|---|---|---|---|")
     for d, C in S["controllers"].items():
         hu = C.get("heads_up", {})
         bins = ", ".join(f"{k} deg: {v:.0f}%" for k, v in hu.get("tracked_pct_by_gaze_angle", {}).items())
         L.append(f"| {hand[d]} | {C.get('hand', '-')} | {C['fresh_pose_hz']:.0f}/s | "
-                 f"{f(C.get('rest_pos_std_mm'), 2, ' mm')} / {f(C.get('rest_rot_rms_deg'), 3, ' deg')} | "
                  f"{f(C.get('stickhandle', {}).get('tracked_pct'), 1, '%')} | {f(hu.get('tracked_pct'), 1, '%')} | "
                  f"{f(hu.get('longest_untracked_ms'), 0, ' ms')} | {bins} |")
 
     if S["models"]:
         L.append("\n## Blade height while stickhandling (no ice holds it up: this is your hands alone)\n")
+        if S.get("display_mismatch"):
+            L.append(f"Not a fair measure in this run: {S['display_mismatch']}.\n")
         L.append("| stick model | phase | median height | p5..p95 | within a puck height of the ice | jitter |")
         L.append("|---|---|---|---|---|---|")
         for model, M in S["models"].items():
@@ -410,11 +411,10 @@ def render_markdown(S: dict) -> str:
             L.append(f"| {k} | {s['t']:.1f} s | {cells} | {tr} |")
 
     L.append("\n## What the numbers mean\n")
-    L.append("- **Stick models**: two_hand runs the shaft through both grips; top_hand/bottom_hand fix the stick "
-             "in one hand; blend averages the two_hand and top_hand directions.")
-    L.append("- **blade noise, controllers at rest**: each controller's jitter while lying still, carried onto your "
-             "stance and through the stick model. Pure tracking noise at the blade.")
-    L.append("- **holding still**: the blade in your stance, held still. Tracking plus real hand tremor.")
+    L.append("- **Stick models**: two_hand moves the stick rigidly with the line between your grips (the top "
+             "wrist only sets its roll); top_hand/bottom_hand fix the stick in one hand; blend averages the "
+             "two_hand and top_hand directions.")
+    L.append("- **holding still**: the blade in your stance, held still. Your hands' steadiness plus tracking.")
     L.append(f"- **jitter**: the blade minus a smooth {JITTER_WINDOW_S * 1000:.0f} ms fit while stickhandling: what a "
              "game would have to smooth away (smoothing costs latency).")
     L.append("- **blade height / near the ice**: with no stick, nothing holds the blade on the ice but your hands. "

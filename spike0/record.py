@@ -4,7 +4,7 @@ Headset on over Link, a controller in each hand (wrist straps on), then:
 
     uv run python record.py --notes "Quest 3, cable Link, shoots left"
     uv run python record.py --shoots left        # left shot = right hand on top (else: the higher hand)
-    uv run python record.py --stick-length 1.45  # fix the stick length (top grip to heel, metres)
+    uv run python record.py --stick-length 1.45  # your stick, top grip to heel in metres (default 1.40)
     uv run python record.py --no-slap            # skip the slap shots
     uv run python record.py --show-model top_hand  # which stick model the headset shows (default two_hand)
     uv run python record.py --only stance rest   # just some phases
@@ -266,7 +266,7 @@ def run_protocol(shared: Shared, voice: Voice, phases: list[protocol.Phase]) -> 
                 continue
             if cal:
                 shared.stick = cal
-                msg = (f"Stick fitted. {cal.length_m:.2f} metres from your top hand to the blade, "
+                msg = (f"Stick fitted. A {cal.length_m:.2f} metre stick from your top hand to the blade, "
                        f"{HAND[cal.top]} hand on top. Hold your stance and the blade should sit on the ice.")
                 if problems:
                     msg += f" It still looks off, {problems[0]}, but carrying on."
@@ -426,7 +426,7 @@ def main() -> None:
     ap.add_argument("--shoots", choices=("left", "right"),
                     help="your shot side: left = right hand on top (default: the higher hand in the stance)")
     ap.add_argument("--stick-length", type=float,
-                    help="fix the stick length, top grip to heel in metres (default: fitted to your stance)")
+                    help="your stick length, top grip to heel in metres (default %.2f)" % stickmath.DEFAULT_LENGTH)
     ap.add_argument("--no-slap", action="store_true", help="skip the slap-shot phase")
     ap.add_argument("--show-model", choices=stickmath.MODELS, default="two_hand",
                     help="which stick model the headset shows (default two_hand)")
@@ -453,7 +453,8 @@ def main() -> None:
 
 
 def record(args, phases, run_dir, space_type, shared, voice, meta) -> None:
-    with GLFWOffscreenContextProvider() as provider, ContextObject(
+    provider = GLFWOffscreenContextProvider()   # ContextObject's teardown destroys it
+    with ContextObject(
         context_provider=provider,
         instance_create_info=xr.InstanceCreateInfo(
             application_info=xr.ApplicationInfo(application_name="vr-hockey-spike0", engine_name="none"),

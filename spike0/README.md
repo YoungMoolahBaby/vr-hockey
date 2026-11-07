@@ -1,21 +1,26 @@
 # Spike 0: two controllers as a virtual stick, how steady is the blade?
 
 You hold a Quest controller in each hand, the way you hold your stick (no physical stick).
-A guided session of about 4 minutes records both controllers and the headset at about 1 kHz.
+A guided session of about 3.5 minutes records both controllers and the headset at about 1 kHz.
 The analysis builds the virtual stick four ways from the same data and measures each at the
 blade (where the puck is):
 
 | stick model | how the stick follows the hands |
 |---|---|
-| `two_hand` | the shaft runs through both grips (moving the bottom hand tilts the stick) |
+| `two_hand` | the stick moves rigidly with the line between your grips (the top wrist only sets its roll) |
 | `top_hand` | the stick is fixed in the top hand (the wrist steers it) |
 | `bottom_hand` | the stick is fixed in the bottom hand |
 | `blend` | the average of the two_hand and top_hand directions |
 
+The stick has a fixed length: `--stick-length`, top grip to heel, default 1.40 m. In your stance
+its heel sits on the ice, pointing where your hands point. It hangs at a fixed angle from the line
+between your grips rather than running through both, because without a real shaft that line is
+much flatter than a stick: 30 degrees on the first run, against 44 for the stick.
+
 What it measures:
-- **blade noise at rest**: each controller's jitter while lying still, carried onto your stance
-  and through each stick model. Pure tracking noise at the blade.
-- **holding still**: the blade in your stance, held still. Tracking plus real hand tremor.
+- **holding still**: the blade in your stance, held still. Your hands' steadiness plus tracking.
+  (A "controllers lying still" test was dropped: the Quest runtime freezes a controller's pose a
+  few seconds after it is set down, so there is no noise left to measure.)
 - **jitter while stickhandling**: what a game would have to smooth away (smoothing costs latency).
 - **blade near the ice**: nothing physical holds the blade down, so this shows how much the game
   must help keep it on the ice.
@@ -52,7 +57,6 @@ controller's axes. After the stance, the virtual stick appears in white with its
 | step | time | what you do |
 |---|---|---|
 | stance | 10 s | hold the controllers like your stick, in your stance, blade on the ice, still. No stick is shown yet: the stick is fitted to this (redone if it looks off) |
-| rest | 15 s | put both controllers down on a table or chair, still, and look at them |
 | stickhandle | 30 s | stickhandle looking at the blade, keeping it on the ice, slow then fast |
 | heads_up | 30 s | stickhandle looking straight ahead |
 | wrist_shots | 40 s | six full-speed wrist shots |
@@ -60,7 +64,7 @@ controller's axes. After the stance, the virtual stick appears in white with its
 
 Options:
 - `--shoots left` puts the right hand on top. By default the higher hand in the stance is the top.
-- `--stick-length 1.45` fixes the stick length (top grip to heel). By default it is fitted to your stance.
+- `--stick-length 1.45` sets your stick length (top grip to heel). The default is 1.40 m.
 - `--show-model top_hand` changes which model the headset shows. You steer the one you see, so
   that model gets an edge on "blade near the ice"; the other measures are fair to all four.
 - Ctrl+C stops early and keeps what was recorded. `--only stance stickhandle` runs only some steps.

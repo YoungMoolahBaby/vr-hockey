@@ -5,8 +5,7 @@
 Two hands hold a virtual stick (heel at the origin of its frame, blade along +x, shaft up at
 a 45 degree lie): the right hand on top (a left shot), the left hand down the shaft. Each
 controller sees its own update rate (sample-and-hold), white noise, slow drift, and tracking
-dropouts where the runtime would dead-reckon on the IMU. In the rest phase both controllers
-lie on a table.
+dropouts where the runtime would dead-reckon on the IMU.
 """
 
 from __future__ import annotations
@@ -129,27 +128,23 @@ def synthesize(out_dir: Path, seed: int = 1) -> dict:
     rng = np.random.default_rng(seed)
     grip = {TOP: expmap(rng.normal(size=(1, 3)) * 1.0)[0], BOT: expmap(rng.normal(size=(1, 3)) * 1.0)[0]}
     wobble_axis = sm.unit(rng.normal(size=3))
-    table = {TOP: (expmap(rng.normal(size=(1, 3)))[0], np.array([0.7, 0.75, -0.6])),
-             BOT: (expmap(rng.normal(size=(1, 3)))[0], np.array([0.5, 0.75, -0.6]))}
+    start = {TOP: (expmap(rng.normal(size=(1, 3)))[0], np.array([-0.6, 0.9, 0.3])),     # hands at the sides
+             BOT: (expmap(rng.normal(size=(1, 3)))[0], np.array([-0.6, 0.9, -0.2]))}
     phases = protocol.select()
 
     hands = {d: {"R": [], "p": []} for d in (TOP, BOT)}
     heel_true, labels, heads_q, heads_p, phase_log = [], [], [], [], []
     lead = int(GAP_S * RATE)
-    last = {d: table[d] for d in (TOP, BOT)}             # each hand's last pose (R, p)
+    last = {d: start[d] for d in (TOP, BOT)}             # each hand's last pose (R, p)
     t_cursor = 0.0
     for ph in phases:
         n = int(ph.seconds * RATE)
         tau = np.arange(n) / RATE
-        if ph.name == "rest":
-            cur = {d: (np.repeat(table[d][0][None], n, axis=0), np.tile(table[d][1], (n, 1))) for d in (TOP, BOT)}
-            heel = np.full((n, 3), np.nan)
-        else:
-            R_ws, p_ws, s_bot = gen_stick(ph.name, tau)
-            wob = rot(wobble_axis, 0.12 * np.sin(2 * np.pi * 0.4 * tau))      # the bottom hand is not glued on
-            cur = {TOP: (R_ws @ grip[TOP], p_ws + R_ws @ (S_TOP * U)),
-                   BOT: (R_ws @ grip[BOT] @ wob, p_ws + np.einsum("nij,nj->ni", R_ws, s_bot[:, None] * U))}
-            heel = p_ws
+        R_ws, p_ws, s_bot = gen_stick(ph.name, tau)
+        wob = rot(wobble_axis, 0.12 * np.sin(2 * np.pi * 0.4 * tau))          # the bottom hand is not glued on
+        cur = {TOP: (R_ws @ grip[TOP], p_ws + R_ws @ (S_TOP * U)),
+               BOT: (R_ws @ grip[BOT] @ wob, p_ws + np.einsum("nij,nj->ni", R_ws, s_bot[:, None] * U))}
+        heel = p_ws
         for d in (TOP, BOT):
             gR, gp = blend(last[d][0], last[d][1], cur[d][0][0], cur[d][1][0], lead)
             hands[d]["R"] += [gR, cur[d][0]]
@@ -232,18 +227,14 @@ def synthesize(out_dir: Path, seed: int = 1) -> dict:
         span = e["end_t"] - e["start_t"]
         return (t >= e["start_t"] + 0.1 * span) & (t < e["end_t"] - 0.1 * span)
 
-    st, rs, sh = mid("stance"), mid("rest"), labels == "stickhandle"
+    st, sh = mid("stance"), labels == "stickhandle"
     cal = sm.calibrate_stance(clean[TOP][0][st], clean[TOP][1][st], clean[BOT][0][st], clean[BOT][1][st], TOP)
     truth["stick"] = cal.to_dict()
-    Rt_s, pt_s = sm.mean_rotation(clean[TOP][0][st]), clean[TOP][1][st].mean(axis=0)
-    Rb_s, pb_s = sm.mean_rotation(clean[BOT][0][st]), clean[BOT][1][st].mean(axis=0)
-    Rt_n, pt_n = sm.move_noise(noisy[TOP][0][rs], noisy[TOP][1][rs], Rt_s, pt_s)
-    Rb_n, pb_n = sm.move_noise(noisy[BOT][0][rs], noisy[BOT][1][rs], Rb_s, pb_s)
     for model in sm.MODELS:
-        hn = sm.blade_heel(model, cal, Rt_n, pt_n, Rb_n, pb_n)
+        hs = sm.blade_heel(model, cal, noisy[TOP][0][st], noisy[TOP][1][st], noisy[BOT][0][st], noisy[BOT][1][st])
         hh = sm.blade_heel(model, cal, noisy[TOP][0][sh], noisy[TOP][1][sh], noisy[BOT][0][sh], noisy[BOT][1][sh])
         truth["models"][model] = {
-            "rest_heel_std_mm": float(np.sqrt(np.sum(np.var(hn, axis=0))) * 1000),
+            "hold_heel_std_mm": float(np.sqrt(np.sum(np.var(hs, axis=0))) * 1000),
             "stickhandle_height_median_mm": float(np.median(hh[:, 1]) * 1000),
         }
 

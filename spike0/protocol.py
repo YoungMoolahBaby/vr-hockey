@@ -17,11 +17,8 @@ PHASES = (
     Phase("stance", 10,
           "Stance. Hold the controllers exactly like you hold your stick, in your normal stance, "
           "with the blade on the ice. You will not see a stick yet. Hold still."),
-    Phase("rest", 15,
-          "Stillness test. Put both controllers down on a table or a chair so they lie completely still. "
-          "Look at them until you hear the stop sound."),
     Phase("stickhandle", 30,
-          "Stickhandling. Pick the controllers up, look down at the blade, and keep it on the ice. "
+          "Stickhandling. Look down at the blade and keep it on the ice. "
           "Move it side to side, slow at first, then faster."),
     Phase("heads_up", 30,
           "Heads up. Same stickhandling, but look straight ahead, not at the stick."),
