@@ -1,0 +1,21 @@
+[project]
+name = "vr-hockey-spike0"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "glfw>=2.11.0",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
+    "pyopengl>=3.1.10",
+    "pyopenxr>=1.1.6501",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
