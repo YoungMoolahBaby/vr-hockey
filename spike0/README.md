@@ -91,6 +91,52 @@ uv run python analyze.py data\<timestamp>
 This writes `data\<timestamp>\report\report.md`, `summary.json` and two plots. Or just tell
 Claude the folder name.
 
+## Drill: scan, retrieve, first pass
+
+```powershell
+uv run python drill.py
+```
+
+**Setup:** face a clear direction in your play space; that becomes the end boards. Put your blade on
+the ice and press A. The zone is laid out so your blade sits at the end boards, just left of our net.
+
+**Each rep:**
+1. A puck is dumped in down the far wall and rims around toward you from your left.
+   - **Rim assist:** boards in VR have no feel, so as the puck leaves the corner it is steered gently
+     off the boards to where your blade is (at most 1 m out), as if it had kicked off the corner.
+2. F1 commits about 1.5 s before it reaches you. He comes down your wall, chases the puck around
+   the net, or comes down the middle. F2 takes away one of your three outs:
+   - up the wall to your winger
+   - a reverse behind the net to your D partner
+   - up the middle to your center
+3. Only a shoulder check after F1 commits shows which out is open. Pass to it with your stick.
+
+**After each rep:**
+- **The voice gives:** the result, the open out, and whether you checked (none, or too early).
+- **A green line on the ice:** the best pass.
+- **A map at waist height:** green is the best pass, white is the puck's path, orange is where the
+  forecheckers went.
+
+**Scoring and difficulty:**
+- Every out is scored by time to intercept: could a forechecker get a stick on the lane, or reach
+  the receiver, before the puck?
+- **Valued for your passing:** every out is valued at your own pass speed and your own time from
+  control to release. These are medians of your last 20 passes, ignoring fans and glitches.
+- Each out is the best one equally often.
+- **F1's head start adapts** toward about 75% success.
+- **Warm-up:** the first 5 reps of each session don't move the difficulty.
+- **Saved between sessions:** both the head start and your passing (`drill_state.json`).
+- **Reps start only while you grip the stick** and the drill is in front in the headset. A let-go
+  stick stays in your hand, but that doesn't count as playing.
+
+**Controls:**
+- **A:** next rep now
+- **B:** repeat the result
+- **X:** skip the rep
+- **Hold the left stick in (1 s):** lay the zone out again
+
+The grips, Y fitting and left-stick tuning work as in the sandbox.
+
 ## Findings so far
 
 Run 1 (2026-11-07, Quest 3 on cable Link):
@@ -115,4 +161,10 @@ on feel: the blade's rotation was off. So the analysis gives those recordings a 
 | `recfmt.py` | the `rec.csv` / `meta.json` format |
 | `synth.py` | synthetic recordings with known truth (noise, drift, dropouts, 500 Hz updates, top hand off) |
 | `xrcheck.py` | runtime and headset check |
+| `sandbox.py` | free play: the stick, a puck and a net, with settings tuned in the headset; its physics tick, drawing and frame loop are reused by the drills |
+| `puck.py` | the puck, the blade contact, the shaft flex, the ice |
+| `drill.py` | the drill app (a sandbox mode): lays out the zone, runs reps, draws the skaters and the after-rep map |
+| `retrieval.py` | module 1's logic, without XR: scenarios, the time-to-intercept value model, forecheckers, shoulder-check tracking, scoring, the staircase |
+| `zone.py` | the defensive zone: regulation boards with rounded corners (rims), our net, markings |
+| `figures.py` | line-drawn skaters |
 | `tests/` | `uv run pytest`: sizing, the grab rules exact and live = replay, and the analysis recovers the synthetic truth |

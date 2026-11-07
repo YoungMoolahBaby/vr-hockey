@@ -36,6 +36,28 @@ The bet is that the hard part is not the physics engine but four VR problems at 
 Spike 0 decides the stick model, how much the game must steady and hold the blade, and how
 fast Spike 1 has to step.
 
+## Hockey sense
+
+Deep research ([reports/VR hockey sense training.md](reports/VR%20hockey%20sense%20training.md))
+set what to build on top of the physics stick. Sense Arena has only 14 defense drills. The
+studies favour training that:
+- uses realistic game situations
+- has you answer with the stick and body, not buttons
+- makes you go and look for the information
+- adapts the difficulty to you
+- shows you after each rep what you couldn't see
+
+Generic brain drills and plain repetition did not carry over to real play.
+
+| # | module | status |
+|---|---|---|
+| 1 | **Scan, retrieve, first pass** ([spike0/drill.py](spike0/drill.py), [retrieval.py](spike0/retrieval.py)) | built 2026-11-07, not yet played in the headset |
+| 2 | Read the carrier (occlusion) | next |
+| 3 | Gap and angle 1-on-1 (the one-handed angle to the left) | |
+| 4 | 2-on-1 lane hold | |
+| 5 | Net-front swivel | |
+| 6 | 2-on-2 and 3-on-2 reads | |
+
 ## Ice assist (wanted)
 
 With no floor under the blade, the game helps keep it on the ice. The ice works like a floor,

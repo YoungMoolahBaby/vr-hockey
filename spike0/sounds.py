@@ -16,7 +16,7 @@ import numpy as np
 
 RATE = 22050
 LEVELS = (0.35, 0.65, 1.0)          # soft / medium / hard
-PRIORITY = {"clack": 3, "ping": 2, "thud": 1, "tap": 0}
+PRIORITY = {"go": 5, "whistle": 4, "clack": 3, "ping": 2, "thud": 1, "tap": 0}
 
 
 def _env(n: int, decay_s: float) -> np.ndarray:
@@ -50,6 +50,16 @@ def synth(kind: str, rng: np.random.Generator) -> np.ndarray:
         n = int(0.15 * RATE)
         t = np.arange(n) / RATE
         return (0.8 * np.sin(2 * np.pi * 110 * t) + 0.5 * _lowpass(rng.normal(size=n), 0.1)) * _env(n, 0.05)
+    if kind == "go":                  # a rep starts: two quick rising beeps
+        n = int(0.09 * RATE)
+        t = np.arange(n) / RATE
+        beep = lambda f: np.sin(2 * np.pi * f * t) * np.minimum(1, (n - np.arange(n)) / (0.01 * RATE))
+        return np.concatenate([beep(880), np.zeros(int(0.04 * RATE)), beep(1320)])
+    if kind == "whistle":             # a rep ends: a short referee's trill
+        n = int(0.35 * RATE)
+        t = np.arange(n) / RATE
+        f = 2900 + 180 * np.sin(2 * np.pi * 28 * t)
+        return np.sin(2 * np.pi * np.cumsum(f) / RATE) * np.minimum(1, (n - np.arange(n)) / (0.05 * RATE))
     raise ValueError(kind)
 
 

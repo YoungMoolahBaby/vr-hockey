@@ -36,6 +36,7 @@ import ctypes
 import datetime as dt
 import json
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -204,6 +205,15 @@ class VoiceQueue(threading.Thread):
             self.voice.say(text)
 
 
+def _plain(x):
+    """json for numpy values."""
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    if isinstance(x, np.generic):
+        return x.item()
+    raise TypeError(type(x).__name__)
+
+
 class Log:
     """events.jsonl and puck.csv, written from any thread."""
 
@@ -215,7 +225,7 @@ class Log:
 
     def event(self, t: float, kind: str, **data) -> None:
         with self.lock:
-            self.events.write(json.dumps({"t": round(t, 4), "event": kind, **data}) + "\n")
+            self.events.write(json.dumps({"t": round(t, 4), "event": kind, **data}, default=_plain) + "\n")
             self.events.flush()
 
     def puck_row(self, row: str) -> None:
@@ -295,8 +305,19 @@ class Physics:
         state, R, p = self.grab.step(top, bot, pl.squeeze[spec.top_hand], pl.squeeze[spec.bottom_hand], t,
                                      force_top=pl.fitting)
         pl.stick_state = state
-        sim = pl.sim
+        held = R is not None and state in grab.HELD
+        self._world(t, R, p, held)
+        imp = self._step(dt_s, R, p, held)
+        self._feel(imp, state)
+        self._game(t, imp)
+        self.tick += 1
+        if self.tick % 5 == 0:
+            self._log_row(t, imp, state)
 
+    # the steps of a tick: a drill overrides _world and _game
+    def _world(self, t: float, R, p, held: bool) -> None:
+        """Lay out the rink and drop pucks."""
+        pl, sim = self.play, self.play.sim
         if pl.want_recenter and pl.head is not None:
             pl.want_recenter = False
             Rh, ph = pl.head
@@ -305,7 +326,6 @@ class Physics:
                                     fwd=np.array([f[0], 0.0, f[2]]) / max(np.hypot(f[0], f[2]), 1e-6))
             self.log.event(t, "rink", **sim.puck.rink.to_dict())
             pl.want_puck = True
-        held = R is not None and state in grab.HELD
         if pl.want_puck or (self.respawn_at is not None and t >= self.respawn_at):
             spot = self._blade_spot(R, p) if held else self._front_spot()
             if spot is not None:
@@ -313,6 +333,9 @@ class Physics:
                 pl.want_puck, self.respawn_at, self.slow_since, self.shot = False, None, None, None
                 self.log.event(t, "puck", at=spot.round(3).tolist())
 
+    def _step(self, dt_s: float, R, p, held: bool) -> float:
+        """Move the puck (and the stick's flex) one controller sample on."""
+        sim = self.play.sim
         if held:
             bot_e = self.edge_b @ R.T + p
             top_e = self.edge_t @ R.T + p
@@ -320,9 +343,17 @@ class Physics:
         else:
             imp = sim.step(dt_s, None, None)
         self.last_impulse = imp
-        pz = sim.puck
-        hands_now = [spec.top_hand if h == "top" else spec.bottom_hand for h in HOLDERS.get(state, ())]
-        buzz_level = self.play.tuning.values["buzz"]
+        return imp
+
+    def _hands(self, state: int) -> list[str]:
+        spec = self.play.spec
+        return [spec.top_hand if h == "top" else spec.bottom_hand for h in HOLDERS.get(state, ())]
+
+    def _feel(self, imp: float, state: int) -> None:
+        """Sounds and buzz for the blade on the ice and the puck off the blade."""
+        pl, sim = self.play, self.play.sim
+        hands_now = self._hands(state)
+        buzz_level = pl.tuning.values["buzz"]
         for kind, speed in sim.events:                   # the blade landing on the ice
             if kind == "ice" and speed > 0.15:
                 pl.sounds.put(("tap", float(np.clip(speed / 2.0, 0, 1))))
@@ -331,15 +362,18 @@ class Physics:
         sim.events.clear()
         if imp > 0.3:
             pl.sounds.put(("clack", float(np.clip(imp / 8.0, 0, 1))))
-
         # feel: every contact buzzes the hands holding the stick
-        if imp > 0.15 and (t - self.last_buzz > 0.02 or imp > 3.0):
-            self.last_buzz = t
-            amp = float(np.clip(imp / 6.0, 0.08, 1.0)) * self.play.tuning.values["buzz"]
+        if imp > 0.15 and (self.last_t - self.last_buzz > 0.02 or imp > 3.0):
+            self.last_buzz = self.last_t
+            amp = float(np.clip(imp / 6.0, 0.08, 1.0)) * buzz_level
             ms = 12 + 25 * float(np.clip(imp / 6.0, 0, 1))      # a harder hit lasts longer (a heavy puck)
-            hands = [spec.top_hand if h == "top" else spec.bottom_hand for h in HOLDERS.get(state, ())]
-            if amp > 0 and hands:
-                pl.haptics.put((amp, hands, ms))
+            if amp > 0 and hands_now:
+                pl.haptics.put((amp, hands_now, ms))
+
+    def _game(self, t: float, imp: float) -> None:
+        """Free play: call shot speeds, goals, posts, the boards; bring back a puck that's gone."""
+        pl, pz = self.play, self.play.sim.puck
+        spec = pl.spec
         # shots: a hard contact, then call the speed once it's away
         if imp > 2.0 and pz.speed > 6.0:
             if self.shot is None:
@@ -374,12 +408,13 @@ class Physics:
                 self.respawn_at = t
         else:
             self.slow_since = None
-        self.tick += 1
-        if self.tick % 5 == 0:
-            P, V = pz.pos, pz.vel
-            b = np.linalg.norm(sim.bend) * 1000
-            self.log.puck_row(f"{t:.4f},{P[0]:.4f},{P[1]:.4f},{P[2]:.4f},{V[0]:.3f},{V[1]:.3f},{V[2]:.3f},"
-                              f"{imp:.3f},{state},{b:.1f}\n")
+
+    def _log_row(self, t: float, imp: float, state: int) -> None:
+        sim = self.play.sim
+        P, V = sim.puck.pos, sim.puck.vel
+        b = np.linalg.norm(sim.bend) * 1000
+        self.log.puck_row(f"{t:.4f},{P[0]:.4f},{P[1]:.4f},{P[2]:.4f},{V[0]:.3f},{V[1]:.3f},{V[2]:.3f},"
+                          f"{imp:.3f},{state},{b:.1f}\n")
 
 
 # ----------------------------------------------------------------------------- drawing
@@ -388,13 +423,40 @@ class Physics:
 WHITE, RED, BLUE = (0.92, 0.92, 0.92), (0.95, 0.2, 0.2), (0.3, 0.5, 1.0)
 
 
+class Lines:
+    """Line segments for the renderer: line(a, b, colour) one at a time, or many(A, B, colour)
+    for whole arrays of them (much cheaper in Python); then .array()."""
+
+    def __init__(self):
+        self.v: list = []
+        self.blocks: list[np.ndarray] = []
+
+    def __call__(self, a, b, c) -> None:
+        self.v.append((*a, *c))
+        self.v.append((*b, *c))
+
+    def many(self, A, B, c) -> None:
+        """Segments A[i]-B[i] (each (n, 3)), all one colour."""
+        A, B = np.asarray(A, dtype=np.float32), np.asarray(B, dtype=np.float32)
+        out = np.empty((2 * len(A), 6), dtype=np.float32)
+        out[0::2, :3], out[1::2, :3] = A, B
+        out[:, 3:] = c
+        self.blocks.append(out)
+
+    def array(self) -> np.ndarray:
+        parts = self.blocks + [np.asarray(self.v, dtype=np.float32).reshape(-1, 6)]
+        return np.vstack(parts) if len(parts) > 1 else parts[0]
+
+
 def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int) -> np.ndarray:
-    v = []
+    line = Lines()
+    draw_rink(line, rink)
+    draw_puck(line, play.sim.puck)
+    draw_hands_and_stick(line, play, poses, held, stick, state)
+    return line.array()
 
-    def line(a, b, c):
-        v.append((*a, *c))
-        v.append((*b, *c))
 
+def draw_rink(line, rink: pk.Rink) -> None:
     def W(u, y, w):
         return rink.to_world(u, y, w)
 
@@ -431,8 +493,10 @@ def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int)
     for u in np.linspace(-hw, hw, 9)[1:-1]:
         line(W(u, 0, g + d), W(u, gh * 0.6, g + d), mesh)
         line(W(u, gh, g), W(u, gh * 0.6, g + d), mesh)
-    # the puck
-    P = play.sim.puck.pos
+
+
+def draw_puck(line, puck) -> None:
+    P = puck.pos
     ang = np.linspace(0, 2 * np.pi, 17)
     ring = np.stack([np.cos(ang), np.zeros_like(ang), np.sin(ang)], axis=1) * pk.R
     for y in (P[1] - pk.H / 2, P[1] + pk.H / 2):
@@ -441,6 +505,9 @@ def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int)
             line(p0, p1, WHITE)
     for k in range(0, 16, 4):
         line(ring[k] + P - [0, pk.H / 2, 0], ring[k] + P + [0, pk.H / 2, 0], WHITE)
+
+
+def draw_hands_and_stick(line, play: Play, poses: dict, held: dict, stick, state: int) -> None:
     # hands
     for dev, (R, p) in poses.items():
         for axis, col in ((0, (1, 0.2, 0.2)), (1, (0.2, 1, 0.2)), (2, (0.3, 0.5, 1))):
@@ -474,7 +541,6 @@ def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int)
         top = spec.edge(5, top=True) @ R.T + p + bend + slide
         for b0, t0 in zip(bot, top):
             line(b0, t0, blade_c)
-    return np.asarray(v, dtype=np.float32)
 
 
 # ----------------------------------------------------------------------------- main
@@ -499,6 +565,63 @@ class Stick:
             self.next_t = now + 0.09
             return d
         return 0
+
+
+class SandboxMode:
+    """Free play: what X, A, B and the left-stick click do, what is drawn, what is said first.
+    A drill (drill.py) is another mode with the same methods."""
+
+    kind = "sandbox"
+    app_name = "vr-hockey-sandbox"
+
+    def __init__(self, play: Play, voice: VoiceQueue, log: Log):
+        self.play, self.voice, self.log = play, voice, log
+        self.physics: Physics | None = None
+
+    def make_physics(self) -> Physics:
+        self.physics = Physics(self.play, self.voice, self.log)
+        return self.physics
+
+    def intro(self) -> str:
+        return ("Sandbox. Squeeze the grips to hold the stick. Left stick left and right picks a setting, "
+                "up and down changes it. X gives you a new puck. Y fits the stick in your hand.")
+
+    def first_head(self) -> None:
+        self.play.want_recenter = True
+
+    def recenter(self) -> None:
+        self.play.want_recenter = True
+        self.voice.say("Net in front of you.", key="rink")
+
+    def button(self, name: str, t_sim: float) -> None:
+        """X, A or B pressed (A and B only while not fitting the stick)."""
+        pl, tu = self.play, self.play.tuning
+        if name == "x":
+            pl.want_puck = True
+        elif name == "b":
+            self.voice.say(tu.describe(), key="setting")
+        elif name == "a":
+            SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": pl.spec.to_dict()}, indent=2))
+            pl.fit.save(record.FIT_PATH, pl.spec)
+            self.voice.say("Saved.", key="saved")
+            self.log.event(t_sim, "saved", values=dict(tu.values))
+
+    def frame(self, now: float) -> None:
+        """Once a frame, in the render thread."""
+
+    def draw(self, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+        return scene(self.play, self.play.sim.puck.rink, poses, held, stick, state)
+
+    def status(self) -> str:
+        pz = self.play.sim.puck
+        return f"puck {pz.speed:5.1f} m/s  goals={pz.goals}"
+
+    def meta(self) -> dict:
+        pz = self.play.sim.puck
+        return {"rink": pz.rink.to_dict(), "goals": pz.goals, "shots_mph": self.physics.shots}
+
+    def close(self) -> None:
+        pass
 
 
 def main() -> None:
@@ -527,7 +650,10 @@ def main() -> None:
         lock.unlink(missing_ok=True)
 
 
-def run(args, play: Play, run_dir: Path) -> None:
+def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
+    # Python hands the GIL between threads every 5 ms by default: drawing a frame would then stall
+    # the 1 kHz physics thread for up to 5 ms at a time. Hand it over every 0.5 ms instead.
+    sys.setswitchinterval(0.0005)
     voice = VoiceQueue(record.Voice(not args.no_voice))
     voice.start()
     sounds = Sounds(not args.no_sound)
@@ -535,7 +661,7 @@ def run(args, play: Play, run_dir: Path) -> None:
     with ContextObject(
         context_provider=provider,
         instance_create_info=xr.InstanceCreateInfo(
-            application_info=xr.ApplicationInfo(application_name="vr-hockey-sandbox", engine_name="none"),
+            application_info=xr.ApplicationInfo(application_name=mode_cls.app_name, engine_name="none"),
             enabled_extension_names=[xr.KHR_OPENGL_ENABLE_EXTENSION_NAME,
                                      xr.KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME],
         ),
@@ -543,15 +669,16 @@ def run(args, play: Play, run_dir: Path) -> None:
     ) as ctx:
         run_dir.mkdir(parents=True, exist_ok=False)
         log = Log(run_dir)
-        meta = {"created": dt.datetime.now().isoformat(timespec="seconds"), "kind": "sandbox", "notes": args.notes,
+        meta = {"created": dt.datetime.now().isoformat(timespec="seconds"), "kind": mode_cls.kind, "notes": args.notes,
                 "runtime": xr.get_instance_properties(ctx.instance).runtime_name.decode(),
                 "system": xr.get_system_properties(ctx.instance, ctx.system_id).system_name.decode(),
                 "settings_start": dict(play.tuning.values), "rate_hz": 1000, "lag_ms": 0, "space": "stage"}
-        print(f"sandbox: {meta['system']} | recording to {run_dir}")
+        print(f"{mode_cls.kind}: {meta['system']} | recording to {run_dir}")
         inputs = record.Inputs(ctx)
         renderer = record.LineRenderer()
         sampler = record.Sampler(ctx, inputs.spaces, inputs.head, 1000, 0, play, run_dir / "rec.csv")
-        physics = Physics(play, voice, log)
+        mode = mode_cls(play, voice, log)
+        physics = mode.make_physics()
         sampler.on_tick = physics
         sampler.start()
 
@@ -563,8 +690,7 @@ def run(args, play: Play, run_dir: Path) -> None:
                     _thread.interrupt_main()
                     return
         threading.Thread(target=watchdog, daemon=True, name="watchdog").start()
-        voice.say("Sandbox. Squeeze the grips to hold the stick. Left stick left and right picks a setting, "
-                  "up and down changes it. X gives you a new puck. Y fits the stick in your hand.")
+        voice.say(mode.intro())
 
         sync_info = xr.ActionsSyncInfo(active_action_sets=[xr.ActiveActionSet(action_set=ctx.default_action_set)])
         disp_loc = [xr.SpaceLocation() for _ in inputs.spaces]   # no velocity chain: a temporary one dangles
@@ -577,7 +703,7 @@ def run(args, play: Play, run_dir: Path) -> None:
         last_change, announced = 0.0, True
         click_since, click_done = None, False
         last_status, away_since = 0.0, None
-        rink_set = False
+        head_seen = False
         try:
             for frame_state in ctx.frame_loop():
                 now = time.time()
@@ -606,8 +732,9 @@ def run(args, play: Play, run_dir: Path) -> None:
                 if not r.is_exception() and (head_loc._location_flags & record.NEED_POSE) == record.NEED_POSE:
                     o, q = head_loc.pose.orientation, head_loc.pose.position
                     play.head = (stickmath.quat_to_mat(np.array([o.x, o.y, o.z, o.w])), np.array([q.x, q.y, q.z]))
-                    if not rink_set:
-                        play.want_recenter, rink_set = True, True
+                    if not head_seen:
+                        head_seen = True
+                        mode.first_head()
 
                 # ---- tuning and buttons
                 tu = play.tuning
@@ -638,17 +765,17 @@ def run(args, play: Play, run_dir: Path) -> None:
                         tu.values.update(roll=new_fit.roll_deg, pitch=new_fit.pitch_deg, yaw=new_fit.yaw_deg)
                         play.retune()
                 if inp["x"] and not prev["x"]:
-                    play.want_puck = True
-                # the net moves only on a deliberate 1 s press of the stick (pushing it hard clicks it)
+                    mode.button("x", sampler.shared.t_now)
+                # recentering only on a deliberate 1 s press of the stick (pushing it hard clicks it)
                 if inp["lclick"]:
                     click_since = click_since or now
                     if now - click_since > 1.0 and not click_done:
-                        play.want_recenter, click_done = True, True
-                        voice.say("Net in front of you.", key="rink")
+                        click_done = True
+                        mode.recenter()
                 else:
                     click_since, click_done = None, False
                 if inp["b"] and not prev["b"] and not play.fitting:
-                    voice.say(tu.describe(), key="setting")
+                    mode.button("b", sampler.shared.t_now)
                 if inp["a"] and not prev["a"] and play.fitting:
                     play.fitting = False
                     play.fit.save(record.FIT_PATH, play.spec)
@@ -659,10 +786,8 @@ def run(args, play: Play, run_dir: Path) -> None:
                     log.event(sampler.shared.t_now, "fit_saved", **f.to_dict())
                     inputs.buzz(top_hand_dev, 0.8, 60)
                 elif inp["a"] and not prev["a"]:
-                    SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
-                    play.fit.save(record.FIT_PATH, play.spec)
-                    voice.say("Saved.", key="saved")
-                    log.event(sampler.shared.t_now, "saved", values=dict(tu.values))
+                    mode.button("a", sampler.shared.t_now)
+                mode.frame(now)
                 for k in prev:
                     prev[k] = inp[k]
 
@@ -687,26 +812,25 @@ def run(args, play: Play, run_dir: Path) -> None:
                     inputs.buzz(h, amp, ms)
 
                 held = {top: dgrab.on["t"], bot: dgrab.on["b"]}
-                verts = scene(play, play.sim.puck.rink, poses, held, (R, p), state)
+                verts = mode.draw(poses, held, (R, p), state)
                 for view in ctx.view_loop(frame_state):
                     proj = np.asarray(Matrix4x4f.create_projection_fov(GraphicsAPI.OPENGL, view.fov, 0.05, 100.0).m)
                     renderer.draw(verts, proj @ record.view_matrix(view.pose), (0.05, 0.06, 0.09))
                 if now - last_status > 2:
                     last_status = now
-                    pz = play.sim.puck
                     print(f"  t={play.t_now:6.1f}s  samples/s={sampler.n / max(play.t_now, 1e-9):.0f}  "
-                          f"stick={grab.STATE_NAMES[play.stick_state]:<12} puck {pz.speed:5.1f} m/s  "
-                          f"goals={pz.goals}  setting: {tu.describe()}", flush=True)
+                          f"stick={grab.STATE_NAMES[play.stick_state]:<12} {mode.status()}  "
+                          f"setting: {tu.describe()}", flush=True)
         except KeyboardInterrupt:
             print("stopped with Ctrl+C")
         finally:
             sampler.stop_evt.set()
             sampler.join(timeout=5)
-            pz = play.sim.puck
             meta.update(samples=sampler.n, settings_end=dict(play.tuning.values), spec=play.spec.to_dict(),
-                        fit=play.fit.to_dict(), params=play.params.to_dict(), rink=pz.rink.to_dict(),
-                        goals=pz.goals, shots_mph=physics.shots, phases=[], completed=True, ended="quit")
+                        fit=play.fit.to_dict(), params=play.params.to_dict(), phases=[], completed=True,
+                        ended="quit", **mode.meta())
             recfmt.write_meta(run_dir, meta)
+            mode.close()
             log.close()
     print(f"saved {run_dir}")
 
