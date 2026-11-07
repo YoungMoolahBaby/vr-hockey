@@ -30,7 +30,15 @@ import numpy as np
 import stickmath as sm
 from stickspec import StickSpec
 
-SQUEEZE_ON, SQUEEZE_OFF = 0.6, 0.35       # hysteresis: press past 0.6 to grab, release below 0.35
+SQUEEZE_ON, SQUEEZE_OFF = 0.5, 0.25       # hysteresis: press past half way to grab, release below a quarter
+# a grip must stay released this long to let go (a slip mid-swing doesn't count). Jon, session 2: the
+# left grip slipped and came back within 0.4 s 31 times in 9 minutes; letting go with the bottom hand
+# costs nothing (the stick stays in the top hand), so it gets the longer wait; the top hand stays quick
+# for taking it off the stick on D.
+RELEASE_TOP_S = 0.25
+RELEASE_BOTTOM_S = 0.40
+RELEASE_S = RELEASE_TOP_S
+BLEND_S = 0.12      # grabbing eases the stick into the hold over this long instead of jumping
 NONE, TOP, BOTTOM, BOTH, LOOSE_TOP, LOOSE_BOTTOM = 0, 1, 2, 3, 4, 5
 STATE_NAMES = {NONE: "none", TOP: "top", BOTTOM: "bottom", BOTH: "both",
                LOOSE_TOP: "loose top", LOOSE_BOTTOM: "loose bottom"}
@@ -85,14 +93,33 @@ def hold(spec: StickSpec, fit: Fit) -> tuple[np.ndarray, np.ndarray]:
 # ----------------------------------------------------------------------------- grip states
 
 
-def held(squeeze: np.ndarray) -> np.ndarray:
-    """Grip button pressed, with hysteresis."""
-    out = np.zeros(len(squeeze), dtype=bool)
-    on = False
-    for i, v in enumerate(np.asarray(squeeze, dtype=float)):
-        on = v >= SQUEEZE_ON if not on else v > SQUEEZE_OFF
-        out[i] = on
-    return out
+class GripFilter:
+    """One grip button: hysteresis, and a release only counts once it has lasted RELEASE_S."""
+
+    def __init__(self, release_s: float = RELEASE_S):
+        self.release_s = release_s
+        self.on = False
+        self.below_since = None
+
+    def update(self, v: float, t: float) -> bool:
+        if not self.on:
+            if v >= SQUEEZE_ON:
+                self.on, self.below_since = True, None
+        elif v <= SQUEEZE_OFF:
+            if self.below_since is None:
+                self.below_since = t
+            if t - self.below_since >= self.release_s - 1e-9:
+                self.on, self.below_since = False, None
+        else:
+            self.below_since = None
+        return self.on
+
+
+def held(squeeze: np.ndarray, t: np.ndarray | None = None, release_s: float = RELEASE_S) -> np.ndarray:
+    """Grip button held, per sample (t in seconds; default: 1 kHz samples)."""
+    t = np.arange(len(squeeze)) / 1000.0 if t is None else np.asarray(t, dtype=float)
+    f = GripFilter(release_s)
+    return np.array([f.update(float(v), float(ti)) for v, ti in zip(squeeze, t)], dtype=bool)
 
 
 def next_state(prev: int, top_held: bool, bottom_held: bool) -> int:
@@ -146,9 +173,24 @@ def both_pose(R_ts, p_ts, q_b, Rt, pt, pb):
     return A @ R, pt + np.einsum("nij,nj->ni", A, p - pt)
 
 
-def replay(spec: StickSpec, fit: Fit, state, Rt, pt, Rb, pb, valid_t, valid_b):
+def ease_from(Rf, pf, R, p, w):
+    """Blend from pose (Rf, pf) toward (R, p) by weight w in [0, 1] (arrays of poses)."""
+    qf, q = sm.mat_to_quat(Rf), sm.mat_to_quat(R)
+    qf = np.where((np.sum(qf * q, axis=-1) < 0)[..., None], -qf, qf)
+    w = np.asarray(w)[..., None]
+    qb = (1 - w) * qf + w * q
+    return sm.quat_to_mat(qb / np.linalg.norm(qb, axis=-1, keepdims=True)), (1 - w) * pf + w * p
+
+
+def _smooth(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3 - 2 * x)
+
+
+def replay(spec: StickSpec, fit: Fit, state, Rt, pt, Rb, pb, valid_t, valid_b, t=None):
     """Stick pose (R (N,3,3), p (N,3)) for every sample; NaN where it is unknown."""
     R_ts, p_ts = hold(spec, fit)
+    t = np.arange(len(state)) / 1000.0 if t is None else np.asarray(t, dtype=float)
     N = len(state)
     R = np.full((N, 3, 3), np.nan)
     p = np.full((N, 3), np.nan)
@@ -158,14 +200,24 @@ def replay(spec: StickSpec, fit: Fit, state, Rt, pt, Rb, pb, valid_t, valid_b):
     for i0, i1 in zip(starts, ends):
         s = state[i0]
         sl = slice(i0, i1)
-        if s == TOP:
-            R[sl], p[sl] = top_pose(R_ts, p_ts, Rt[sl], pt[sl])
-            bad = ~valid_t[sl]
-        elif s == BOTH:
-            R0, p0 = top_pose(R_ts, p_ts, Rt[i0], pt[i0])
-            q_b = R0.T @ (pb[i0] - p0)                    # where the bottom hand took the stick
-            R[sl], p[sl] = both_pose(R_ts, p_ts, q_b, Rt[sl], pt[sl], pb[sl])
-            bad = ~(valid_t[sl] & valid_b[sl])
+        if s in (TOP, BOTH):
+            if s == TOP:
+                R[sl], p[sl] = top_pose(R_ts, p_ts, Rt[sl], pt[sl])
+                bad = ~valid_t[sl]
+            else:
+                R0, p0 = top_pose(R_ts, p_ts, Rt[i0], pt[i0])
+                q_b = R0.T @ (pb[i0] - p0)                # where the bottom hand took the stick
+                R[sl], p[sl] = both_pose(R_ts, p_ts, q_b, Rt[sl], pt[sl], pb[sl])
+                bad = ~(valid_t[sl] & valid_b[sl])
+            # ease in: start from where the stick was (carried by the top hand), not a jump
+            if i0 > 0 and not np.isnan(p[i0 - 1, 0]) and valid_t[i0 - 1]:
+                k = np.flatnonzero(t[sl] - t[i0] < BLEND_S)
+                if len(k):
+                    ks = i0 + k
+                    rel_R = Rt[i0 - 1].T @ R[i0 - 1]
+                    rel_p = Rt[i0 - 1].T @ (p[i0 - 1] - pt[i0 - 1])
+                    Rf, pf = Rt[ks] @ rel_R, pt[ks] + Rt[ks] @ rel_p
+                    R[ks], p[ks] = ease_from(Rf, pf, R[ks], p[ks], _smooth((t[ks] - t[i0]) / BLEND_S))
         elif s in RIDES:                                  # rigid in one hand, exactly where it was
             Rh, ph, ok = (Rt, pt, valid_t) if RIDES[s] == "top" else (Rb, pb, valid_b)
             if i0 == 0 or np.isnan(p[i0 - 1, 0]) or not ok[i0 - 1]:
@@ -189,6 +241,8 @@ class Grab:
         self.set_fit(fit)
         self.state = NONE
         self.on = {"t": False, "b": False}
+        self.filters = {"t": GripFilter(RELEASE_TOP_S), "b": GripFilter(RELEASE_BOTTOM_S)}
+        self.ease = None               # (R rel to the top hand, p rel to the top hand, t0) while easing in
         self.R = self.p = None
         self.q_b = None
         self.rider = None              # the stick in the hand it rides in (LOOSE_TOP, BOTTOM, LOOSE_BOTTOM)
@@ -204,14 +258,20 @@ class Grab:
         self.spec = spec
         self.set_fit(fit)
 
-    def _held(self, key, v):
-        self.on[key] = v >= SQUEEZE_ON if not self.on[key] else v > SQUEEZE_OFF
+    def _held(self, key, v, t):
+        self.on[key] = self.filters[key].update(v, t)
         return self.on[key]
 
-    def step(self, top, bottom, sq_t: float, sq_b: float, force_top: bool = False):
-        """top/bottom: (R, p) or None if not tracked. Returns (state, R, p) of the stick."""
-        ht, hb = self._held("t", sq_t), self._held("b", sq_b)
+    def step(self, top, bottom, sq_t: float, sq_b: float, t: float, force_top: bool = False):
+        """top/bottom: (R, p) or None if not tracked; t in seconds. Returns (state, R, p) of the stick."""
+        ht, hb = self._held("t", sq_t, t), self._held("b", sq_b, t)
         new = TOP if force_top else next_state(self.state, ht, hb)
+        if new in (TOP, BOTH) and new != self.state and self.R is not None:
+            lt = self.last["top"]
+            if lt is not None:                      # ease in from where the stick was
+                self.ease = (lt[0].T @ self.R, lt[0].T @ (self.p - lt[1]), t)
+        elif new not in (TOP, BOTH):
+            self.ease = None
         if new == TOP and top is not None:
             self.R, self.p = top_pose(self.R_ts, self.p_ts, *top)
         elif new == BOTH and top is not None and bottom is not None:
@@ -229,6 +289,14 @@ class Grab:
                     self.rider = (h0[0].T @ self.R, h0[0].T @ (self.p - h0[1]))
                 Rr, pr = self.rider
                 self.R, self.p = hand[0] @ Rr, hand[1] + hand[0] @ pr
+        if self.ease is not None and new in (TOP, BOTH) and top is not None:
+            rel_R, rel_p, t0 = self.ease
+            if t - t0 < BLEND_S:
+                Rf, pf = top[0] @ rel_R, top[1] + top[0] @ rel_p
+                R, p = ease_from(Rf[None], pf[None], self.R[None], self.p[None], [_smooth((t - t0) / BLEND_S)])
+                self.R, self.p = R[0], p[0]
+            else:
+                self.ease = None
         self.state = new
         self.last = {"top": top, "bottom": bottom}
         return self.state, self.R, self.p

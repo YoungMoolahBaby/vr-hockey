@@ -24,9 +24,11 @@ def test_held_as_asked(run):
 
 def test_blade_height(run):
     truth, S = run
-    for ph in ("stickhandle", "one_hand"):
+    # one_hand: the stick is frozen in the bottom hand from one noisy sample at the release, so its
+    # whole step carries that sample's few mm of noise (sign varies with the seed)
+    for ph, tol in (("stickhandle", 4.0), ("one_hand", 6.0)):
         P, T = S["phases"][ph], truth["phases"][ph]
-        assert P["height_median_mm"] == pytest.approx(T["height_median_mm"], abs=4.0), ph
+        assert P["height_median_mm"] == pytest.approx(T["height_median_mm"], abs=tol), ph
         assert P["near_ice_pct"] == pytest.approx(T["near_ice_pct"], abs=5.0), ph
     assert "lift_p90_mm" in S["verdict"]
 

@@ -8,16 +8,20 @@ Controls
   left thumbstick left/right    pick a setting (the voice says which, and its value)
   left thumbstick up/down       change it (hold to keep changing)
   X                             a new puck, on your blade
+  Y                             fit the stick in your hand: right thumbstick turns the blade
+                                (left/right) and tilts the stick (up/down); hold B and push to
+                                swing it sideways; A saves the fit (Y again leaves without saving)
   hold the left thumbstick in   (1 s) put the net straight in front of you again
   B                             say the current setting again
   A                             save the settings (sandbox_settings.json, used next time)
 
-Settings: stick length, lie, curve depth, face open, flex, blade turn / stick tilt / stick
-swing (the fit in your hand), ice friction, blade pop, blade grip, buzz strength.
+Settings: stick length, lie, curve depth, face open, flex, forgiveness (extra reach for catching
+the puck), ice friction, blade pop, blade grip, buzz strength.
 
 The puck physics (puck.py) runs at 1 kHz, four substeps per controller sample, with the blade
-flexing on the shaft. Any part of the blade at or below the ice counts as on the ice. Every
-puck contact buzzes the hands holding the stick.
+flexing on the shaft. The ice holds the blade up: push lower and the shaft bends (and loads)
+instead. Sounds: a tap when the blade lands on the ice, a clack off the puck, posts, boards.
+Every puck contact buzzes the hands holding the stick; a touchdown gives a light tick.
 
 Quit the app in the headset (or Ctrl+C) to end. Everything is recorded to data/<timestamp>/:
 rec.csv (controllers), puck.csv (puck, 200 Hz), events.jsonl (settings, goals, shots), meta.json.
@@ -49,6 +53,7 @@ import recfmt
 import record
 import stickmath
 import stickspec
+from sounds import Sounds
 from stickspec import INCH
 
 HERE = Path(__file__).resolve().parent
@@ -76,9 +81,7 @@ SETTINGS = (
     Setting("curve_in", "curve depth", 0.125, 0.0, 1.0, "{:.3g} inches"),
     Setting("face_open", "face open", 1, -10, 25, "{:.0f} degrees"),
     Setting("flex", "flex", 5, 30, 120, "{:.0f}"),
-    Setting("roll", "blade turn", 2, -180, 180, "{:.0f} degrees"),
-    Setting("pitch", "stick tilt", 2, -150, 90, "{:.0f} degrees"),
-    Setting("yaw", "stick swing", 2, -90, 90, "{:.0f} degrees"),
+    Setting("forgive_cm", "forgiveness", 0.5, 0.0, 4.0, "{:g} centimetres"),
     Setting("ice_mu", "ice friction", 0.005, 0.0, 0.1, "{:.3f}"),
     Setting("pop", "blade pop", 0.05, 0.0, 0.9, "{:.2f}"),
     Setting("grip", "blade grip", 0.05, 0.0, 1.0, "{:.2f}"),
@@ -97,7 +100,7 @@ class Tuning:
         return {"length_in": spec.length_m / INCH, "lie": spec.lie, "curve_in": spec.curve_depth_m / INCH,
                 "face_open": spec.face_open_deg, "flex": spec.flex, "roll": fit.roll_deg, "pitch": fit.pitch_deg,
                 "yaw": fit.yaw_deg, "ice_mu": params.ice_mu, "pop": params.blade_pop, "grip": params.blade_grip,
-                "buzz": 0.6}
+                "buzz": 0.6, "forgive_cm": params.forgiveness * 100}
 
     def spec(self) -> stickspec.StickSpec:
         v = self.values
@@ -111,6 +114,7 @@ class Tuning:
         params.ice_mu = self.values["ice_mu"]
         params.blade_pop = self.values["pop"]
         params.blade_grip = self.values["grip"]
+        params.forgiveness = self.values["forgive_cm"] / 100
 
     @property
     def current(self) -> Setting:
@@ -157,6 +161,8 @@ class Play:
         self.haptics: queue.SimpleQueue = queue.SimpleQueue()
         self.stick_state = grab.NONE
         self.last_focus = time.time()
+        self.fitting = False                   # Y: the stick held in the right hand while you fit it
+        self.sounds: queue.SimpleQueue = queue.SimpleQueue()
 
     def retune(self) -> None:
         self.spec = self.tuning.spec()
@@ -284,7 +290,8 @@ class Physics:
         self.last_t = t
         spec = pl.spec
         top, bot = tick.get(spec.top_hand), tick.get(spec.bottom_hand)
-        state, R, p = self.grab.step(top, bot, pl.squeeze[spec.top_hand], pl.squeeze[spec.bottom_hand])
+        state, R, p = self.grab.step(top, bot, pl.squeeze[spec.top_hand], pl.squeeze[spec.bottom_hand], t,
+                                     force_top=pl.fitting)
         pl.stick_state = state
         sim = pl.sim
 
@@ -310,7 +317,18 @@ class Physics:
             imp = sim.step(dt_s, bot_e, top_e, R @ self.sweet + p, R @ self.u)
         else:
             imp = sim.step(dt_s, None, None)
+        self.last_impulse = imp
         pz = sim.puck
+        hands_now = [spec.top_hand if h == "top" else spec.bottom_hand for h in HOLDERS.get(state, ())]
+        buzz_level = self.play.tuning.values["buzz"]
+        for kind, speed in sim.events:                   # the blade landing on the ice
+            if kind == "ice" and speed > 0.15:
+                pl.sounds.put(("tap", float(np.clip(speed / 2.0, 0, 1))))
+                if hands_now and buzz_level > 0:
+                    pl.haptics.put((0.12 * buzz_level + 0.05, hands_now))
+        sim.events.clear()
+        if imp > 0.3:
+            pl.sounds.put(("clack", float(np.clip(imp / 8.0, 0, 1))))
 
         # feel: every contact buzzes the hands holding the stick
         if imp > 0.15 and (t - self.last_buzz > 0.02 or imp > 3.0):
@@ -340,6 +358,9 @@ class Physics:
                 self.respawn_at = t + 2.0
             elif kind == "post" and speed > 2:
                 self.voice.say("Post!", key="post")
+                pl.sounds.put(("ping", 1.0))
+            elif kind == "boards" and speed > 1:
+                pl.sounds.put(("thud", float(np.clip(speed / 12.0, 0, 1))))
         pz.events.clear()
         # a puck that's out of reach and stopped comes back
         u, _, w = pz.rink.to_rink(pz.pos)
@@ -433,18 +454,21 @@ def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int)
         shaft_c = (0.6, 0.66, 0.75) if loose else WHITE
         blade_c = (0.8, 0.65, 0.2) if loose else (1.0, 0.85, 0.1)
         bend = play.sim.bend
+        # the headset draws where the hands will be (~30-50 ms ahead of the physics): rest this
+        # stick on the ice itself so it is never drawn through it (more bend, then a slide)
+        bend, slide = pk.ice_rest(bend, float((spec.edge(9) @ R.T + p + bend)[:, 1].min()), R @ spec.u, pk.ICE_BEND)
         grip_s = spec.length_m - spec.grip_from_top_m
         s = np.linspace(spec.length_m, 0, 12)
         xi = np.clip((grip_s - s) / grip_s, 0, 1)
-        pts = (s[:, None] * spec.u) @ R.T + p + (xi ** 2)[:, None] * bend
+        pts = (s[:, None] * spec.u) @ R.T + p + (xi ** 2)[:, None] * bend + slide
         for p0, p1 in zip(pts, pts[1:]):
             line(p0, p1, shaft_c)
         for frac in (0.0, 0.33, 0.66, 1.0):
-            e = spec.edge(9, frac=frac) @ R.T + p + bend
+            e = spec.edge(9, frac=frac) @ R.T + p + bend + slide
             for p0, p1 in zip(e, e[1:]):
                 line(p0, p1, blade_c)
-        bot = spec.edge(5) @ R.T + p + bend
-        top = spec.edge(5, top=True) @ R.T + p + bend
+        bot = spec.edge(5) @ R.T + p + bend + slide
+        top = spec.edge(5, top=True) @ R.T + p + bend + slide
         for b0, t0 in zip(bot, top):
             line(b0, t0, blade_c)
     return np.asarray(v, dtype=np.float32)
@@ -480,6 +504,7 @@ def main() -> None:
     ap.add_argument("--shoots", choices=("left", "right"), default="left")
     ap.add_argument("--fresh", action="store_true", help="ignore sandbox_settings.json and start from defaults")
     ap.add_argument("--no-voice", action="store_true")
+    ap.add_argument("--no-sound", action="store_true", help="no ice / puck sounds")
     ap.add_argument("--notes", default="")
     args = ap.parse_args()
 
@@ -502,6 +527,7 @@ def main() -> None:
 def run(args, play: Play, run_dir: Path) -> None:
     voice = VoiceQueue(record.Voice(not args.no_voice))
     voice.start()
+    sounds = Sounds(not args.no_sound)
     provider = GLFWOffscreenContextProvider()
     with ContextObject(
         context_provider=provider,
@@ -535,15 +561,16 @@ def run(args, play: Play, run_dir: Path) -> None:
                     return
         threading.Thread(target=watchdog, daemon=True, name="watchdog").start()
         voice.say("Sandbox. Squeeze the grips to hold the stick. Left stick left and right picks a setting, "
-                  "up and down changes it. X gives you a new puck.")
+                  "up and down changes it. X gives you a new puck. Y fits the stick in your hand.")
 
         sync_info = xr.ActionsSyncInfo(active_action_sets=[xr.ActiveActionSet(action_set=ctx.default_action_set)])
         disp_loc = [xr.SpaceLocation() for _ in inputs.spaces]   # no velocity chain: a temporary one dangles
         head_loc = xr.SpaceLocation()
         dgrab = grab.Grab(play.spec, play.fit)
         version = play.version
+        top_hand_dev = play.spec.top_hand
         pick, change = Stick(), Stick()
-        prev = {"x": False, "a": False, "b": False, "lclick": False}
+        prev = {"x": False, "a": False, "b": False, "y": False, "lclick": False}
         last_change, announced = 0.0, True
         click_since, click_done = None, False
         last_status, away_since = 0.0, None
@@ -597,6 +624,16 @@ def run(args, play: Play, run_dir: Path) -> None:
                 if not announced and now - last_change > 0.5:
                     voice.say(tu.describe(), key="setting")
                     announced = True
+                if inp["y"] and not prev["y"]:
+                    play.fitting = not play.fitting
+                    voice.say("Stick fitting. Right stick turns and tilts it. Hold B and push to swing it. "
+                              "A saves." if play.fitting else "Fitting off, not saved.", key="fit")
+                if play.fitting:
+                    dt_s = frame_state.predicted_display_period / 1e9 if frame_state.predicted_display_period else 1 / 72
+                    new_fit = record.apply_thumbstick(play.fit, inp["thumb"], inp["b"], dt_s)
+                    if new_fit != play.fit:
+                        tu.values.update(roll=new_fit.roll_deg, pitch=new_fit.pitch_deg, yaw=new_fit.yaw_deg)
+                        play.retune()
                 if inp["x"] and not prev["x"]:
                     play.want_puck = True
                 # the net moves only on a deliberate 1 s press of the stick (pushing it hard clicks it)
@@ -607,9 +644,18 @@ def run(args, play: Play, run_dir: Path) -> None:
                         voice.say("Net in front of you.", key="rink")
                 else:
                     click_since, click_done = None, False
-                if inp["b"] and not prev["b"]:
+                if inp["b"] and not prev["b"] and not play.fitting:
                     voice.say(tu.describe(), key="setting")
-                if inp["a"] and not prev["a"]:
+                if inp["a"] and not prev["a"] and play.fitting:
+                    play.fitting = False
+                    play.fit.save(record.FIT_PATH, play.spec)
+                    SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
+                    f = play.fit
+                    voice.say(f"Fit saved. Turned {f.roll_deg:.0f}, tilted {f.pitch_deg:.0f}, "
+                              f"swung {f.yaw_deg:.0f} degrees.", key="fit")
+                    log.event(sampler.shared.t_now, "fit_saved", **f.to_dict())
+                    inputs.buzz(top_hand_dev, 0.8, 60)
+                elif inp["a"] and not prev["a"]:
                     SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
                     play.fit.save(record.FIT_PATH, play.spec)
                     voice.say("Saved.", key="saved")
@@ -622,7 +668,12 @@ def run(args, play: Play, run_dir: Path) -> None:
                     dgrab.configure(play.spec, play.fit)
                     version = play.version
                 top, bot = play.spec.top_hand, play.spec.bottom_hand
-                state, R, p = dgrab.step(poses.get(top), poses.get(bot), play.squeeze[top], play.squeeze[bot])
+                state, R, p = dgrab.step(poses.get(top), poses.get(bot), play.squeeze[top], play.squeeze[bot], now,
+                                         force_top=play.fitting)
+                snd = []
+                while not play.sounds.empty():
+                    snd.append(play.sounds.get_nowait())
+                sounds.play_most_important(snd)
                 buzz: dict = {}
                 while not play.haptics.empty():
                     amp, hands = play.haptics.get_nowait()

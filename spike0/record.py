@@ -645,6 +645,7 @@ def record(args, phases, run_dir, space_type, shared, voice, meta) -> None:
                 a_was = inp["a"]
                 was = dict(g.on)
                 state, R, p = g.step(poses.get(top), poses.get(bot), shared.squeeze[top], shared.squeeze[bot],
+                                     time.perf_counter(),
                                      force_top=shared.fitting)
                 for key, dev in (("t", top), ("b", bot)):
                     if g.on[key] and not was[key]:

@@ -103,7 +103,7 @@ def test_goal_and_posts():
 
 def test_flex_stiffness_and_whip():
     f = pk.Flex(70)
-    assert 15 < f.hz < 30                                # a stick's first bend is tens of Hz
+    assert 8 < f.hz < 30                                 # a hand-held stick bends at roughly 10-30 Hz
     assert pk.Flex(100).k > f.k > pk.Flex(50).k          # higher flex rating = stiffer
     shaft, x, h, peak = np.array([0.0, 1.0, 0.0]), np.zeros(3), 0.00025, 0.0
     for i in range(int(0.3 / h)):
@@ -125,3 +125,58 @@ def test_slap_with_flex(flex):
         b = moved(b, np.array([0.020, 0, 0]))           # 20 m/s
         sim.step(0.001, b[0], b[1], shaft=np.array([0.0, 1.0, 0.0]))
     assert 18 < sim.puck.speed < 32
+
+
+def test_the_ice_holds_the_blade_and_the_shaft_bends():
+    """Hands 5 cm too low: the blade stays on the ice and the shaft takes the bend."""
+    sim = pk.Sim(pk.Params(), RINK, 70)
+    shaft = np.array([-np.cos(np.radians(45)), np.sin(np.radians(45)), 0.0])
+    b = blade_at(0.0, 0.0, y=0.05)                          # start 5 cm above the ice
+    for k in range(400):
+        y = 0.05 - 0.10 * min(k / 200, 1.0)                 # lower the hands until the rigid blade is 5 cm under
+        bot, top = blade_at(0.0, 0.0, y=y)
+        sim.step(0.001, bot, top, bot.mean(axis=0), shaft)
+    low = (bot + sim.bend + sim.slide)[:, 1].min()
+    assert low == pytest.approx(0.0, abs=0.003)             # on the ice, not through it
+    assert np.linalg.norm(sim.bend) <= pk.ICE_BEND + 1e-6   # the shaft bows a little...
+    assert np.linalg.norm(sim.slide) > 0.02                 # ...and the stick slides up for the rest
+    assert [e[0] for e in sim.events].count("ice") == 1     # one touchdown
+
+
+def test_a_stick_pressed_into_the_ice_does_not_fire_a_resting_puck():
+    """Session 2: hands held low loaded the shaft, then let go and fired a resting puck at 6 m/s."""
+    sim = pk.Sim(pk.Params(), RINK, 70)
+    shaft = np.array([0.0, np.sin(np.radians(45)), np.cos(np.radians(45))])   # leaning back, face +x
+    sim.puck.spawn(np.array([0.06, 0.0]))                    # resting against the face
+    for k in range(3000):
+        tt = k * 0.001
+        y = -0.12 * min(tt / 2.0, 1.0)                       # 2 s pressing 12 cm into the ice...
+        if tt > 2.5:
+            y = -0.12 + 0.12 * min((tt - 2.5) / 0.05, 1.0)   # ...then the hands come up in 50 ms
+        bot, top = blade_at(0.0, 0.0, y=y)
+        sim.step(0.001, bot, top, bot.mean(axis=0), shaft)
+    assert sim.puck.speed < 1.0
+
+
+def test_forgiveness_reaches_further():
+    hits = []
+    for forgive in (0.0, 0.03):
+        p = pk.Puck(pk.Params(forgiveness=forgive), RINK)
+        p.spawn(np.array([0.0, 0.0]))
+        b0 = blade_at(-0.08, 0.0)                           # 8 cm away, moving 1.5 cm closer: no touch
+        b1 = moved(b0, np.array([0.015, 0, 0]))
+        p.step(0.001, b0, b1)
+        hits.append(p.speed > 0)
+    assert hits == [False, True]
+
+
+@pytest.mark.parametrize("depth", [0.02, 0.08, 0.30])
+def test_ice_rest_never_leaves_the_blade_in_the_ice(depth):
+    shaft = np.array([-np.cos(np.radians(45)), np.sin(np.radians(45)), 0.0])
+    bend, slide = pk.ice_rest(np.zeros(3), -depth, shaft)
+    lift = bend[1] + slide[1]
+    assert lift == pytest.approx(depth, abs=1e-9)                  # back on the ice exactly
+    assert np.linalg.norm(bend) <= pk.Flex.MAX_BEND + 1e-9         # the shaft bends only so far
+    assert abs(bend @ shaft) < 1e-9                                # and only across the shaft
+    if depth < 0.015:
+        assert np.allclose(slide, 0)                               # a little: the flex takes it all

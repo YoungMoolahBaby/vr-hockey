@@ -113,8 +113,9 @@ def stick_from_recording(df: pd.DataFrame, meta: dict):
         return None
     spec, fit = StickSpec.from_dict(meta["spec"]), grab.Fit.from_dict(meta["fit"])
     T, B = recfmt.Track(df, spec.top_hand), recfmt.Track(df, spec.bottom_hand)
-    state = grab.states(grab.held(T.grip), grab.held(B.grip))
-    R, p = grab.replay(spec, fit, state, T.R, T.p, B.R, B.p, T.valid, B.valid)
+    t = df["t"].to_numpy(dtype=np.float64)
+    state = grab.states(grab.held(T.grip, t, grab.RELEASE_TOP_S), grab.held(B.grip, t, grab.RELEASE_BOTTOM_S))
+    R, p = grab.replay(spec, fit, state, T.R, T.p, B.R, B.p, T.valid, B.valid, t)
     return spec, fit, state, R, p
 
 

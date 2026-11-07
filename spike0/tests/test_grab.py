@@ -41,7 +41,18 @@ def test_hold_keeps_the_grip_in_the_hand():
 
 
 def test_held_hysteresis():
-    assert grab.held(np.array([0, 0.5, 0.7, 0.5, 0.3, 0.5])).tolist() == [False, False, True, True, False, False]
+    assert grab.held(np.array([0, 0.4, 0.55, 0.3, 0.4, 0.3])).tolist() == [False, False, True, True, True, True]
+
+
+def test_a_slip_is_not_a_release():
+    t = np.arange(1000) / 1000
+    sq = np.ones(1000)
+    sq[100:250] = 0.0                                   # a 150 ms slip: still holding
+    sq[500:800] = 0.0                                   # a 300 ms release: let go after 200 ms
+    h = grab.held(sq, t, release_s=0.2)
+    assert h[100:250].all() and h[250:500].all()
+    assert h[500:700].all() and not h[700:800].any()
+    assert h[800:].all()
 
 
 def test_states():
@@ -103,19 +114,30 @@ def test_replay_is_exact_when_the_hands_hold_the_stick():
 
 
 def test_live_step_matches_replay():
-    fit, R_s, p_s, Rt, pt, Rb, pb = _session(1000)
+    fit, R_s, p_s, Rt, pt, Rb, pb = _session(3600)
     n = len(R_s)
-    i = np.arange(n)
-    sq_t = (((0 <= i) & (i < 200)) | ((400 <= i) & (i < 600)) | ((800 <= i) & (i < 900))).astype(float)
-    sq_b = (((100 <= i) & (i < 300)) | ((500 <= i) & (i < 600)) | (950 <= i)).astype(float)
-    state = grab.states(grab.held(sq_t), grab.held(sq_b))
+    i = np.arange(n)                                    # releases last > 0.2 s, so each one counts
+    sq_t = (((0 <= i) & (i < 600)) | ((1200 <= i) & (i < 1800)) | ((2400 <= i) & (i < 2700))).astype(float)
+    sq_b = (((300 <= i) & (i < 900)) | ((1500 <= i) & (i < 1800)) | (3300 <= i)).astype(float)
+    state = grab.states(grab.held(sq_t, release_s=grab.RELEASE_TOP_S), grab.held(sq_b, release_s=grab.RELEASE_BOTTOM_S))
     # every state shows up: top, both, bottom, loose bottom, loose top
     assert {grab.TOP, grab.BOTH, grab.BOTTOM, grab.LOOSE_BOTTOM, grab.LOOSE_TOP} <= set(state.tolist())
     ok = np.ones(n, bool)
     R, p = grab.replay(SPEC, fit, state, Rt, pt, Rb, pb, ok, ok)
     g = grab.Grab(SPEC, fit)
     for i in range(n):
-        s, Ri, pi = g.step((Rt[i], pt[i]), (Rb[i], pb[i]), sq_t[i], sq_b[i])
+        s, Ri, pi = g.step((Rt[i], pt[i]), (Rb[i], pb[i]), sq_t[i], sq_b[i], i / 1000)
         assert s == state[i]
         if not np.isnan(p[i, 0]):
             assert np.allclose(Ri, R[i], atol=1e-9) and np.allclose(pi, p[i], atol=1e-9), i
+
+
+def test_curve_depth_is_the_gap_to_a_straight_edge():
+    """A 1/2" curve: the biggest gap between the blade and a straight edge from heel to toe."""
+    for depth_in, shape in ((0.5, 2.5), (0.75, 2.0), (0.25, 4.0)):
+        spec = SPEC.with_(curve_depth_m=depth_in * stickspec.INCH, curve_shape=shape)
+        e = spec.edge(400)[:, [0, 2]]
+        chord = e[-1] - e[0]
+        n = np.array([-chord[1], chord[0]]) / np.linalg.norm(chord)
+        gap = np.max(np.abs((e - e[0]) @ n))
+        assert gap == pytest.approx(depth_in * stickspec.INCH, rel=0.01)

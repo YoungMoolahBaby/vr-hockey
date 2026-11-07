@@ -83,8 +83,18 @@ class StickSpec:
         return (self.length_m - self.grip_from_top_m) * self.u
 
     def blade_z(self, x):
-        """Curve: the toe curls toward the forehand; curve_shape sets where the bend sits."""
-        return self.z_forehand[2] * self.curve_depth_m * (np.asarray(x) / self.blade_len_m) ** self.curve_shape
+        """Curve: the toe curls toward the forehand; curve_shape sets where the bend sits.
+
+        curve_depth_m is the curve the way it's measured on a real stick: the biggest gap between
+        the blade and a straight edge laid from heel to toe. (Until 2026-11-07 it was the toe's
+        offset from the heel's line, which made a 1/2" curve look about a third as deep.)"""
+        s = max(self.curve_shape, 1.05)
+        xi_star = (1.0 / s) ** (1.0 / (s - 1.0))            # where the gap to the chord is largest
+        gap = xi_star - xi_star ** s                         # that gap, per unit of toe offset (across x)
+        toe_offset = self.curve_depth_m / gap
+        for _ in range(4):                                   # the straight edge is tilted by the toe offset
+            toe_offset = self.curve_depth_m / gap * np.hypot(1.0, toe_offset / self.blade_len_m)
+        return self.z_forehand[2] * toe_offset * (np.asarray(x) / self.blade_len_m) ** s
 
     def edge(self, n: int = 12, top: bool = False, frac: float | None = None) -> np.ndarray:
         """(n, 3) points along the blade heel to toe: the bottom edge, the top edge, or a line at

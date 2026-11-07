@@ -5,8 +5,10 @@ yet): 76.2 mm wide, 25.4 mm tall, 170 g. The blade is the stick's curved plate, 
 bottom and top edge points in the world at the start and end of a step; it moves linearly in
 between, and each step is cut into substeps so a 30 m/s blade can't pass through the puck.
 
-Soft floor (Jon, 2026-11-07): the stick may go through the ice; any part of the blade at or
-below the ice counts as on the ice for hitting the puck.
+The ice holds the blade (Jon, 2026-11-07, after the first sandbox session): the blade can't go
+below the ice; if the hands go lower, the shaft bends instead (the flex loads, like pressing a
+stick into the ice before a slap shot). Only past the flex's limit does the blade go through, and
+then any part of it at or below the ice still counts as on the ice for hitting the puck.
 
 Contact: the blade face's 3D normal at the puck's height. An open face (tilted back) lifts the
 puck. Impulse with restitution ("pop") and Coulomb friction ("grip": the blade can cup and drag
@@ -35,6 +37,9 @@ class Params:
     blade_pop: float = 0.30      # restitution off the blade
     blade_grip: float = 0.35     # friction along the blade face (cupping, dragging)
     blade_thickness: float = 0.012
+    forgiveness: float = 0.01    # extra reach around the blade for catching the puck (m)
+    soft_hands: float = 3.0      # m/s: below this impact speed the bounce fades out (0.5 m/s: none), so a
+                                 # stickhandled puck stays on the blade; hard hits get the full pop
     ice_bounce: float = 0.25
     board_bounce: float = 0.55
     net_bounce: float = 0.08
@@ -161,7 +166,7 @@ class Puck:
         Q = A + t[:, None] * AB
         d = np.linalg.norm(P - Q, axis=1)
         i = int(np.argmin(d))
-        reach = R + self.params.blade_thickness / 2
+        reach = R + self.params.blade_thickness / 2 + self.params.forgiveness
         if d[i] >= reach:
             return None
         # face normal at that segment, pointing at the puck
@@ -189,7 +194,10 @@ class Puck:
         if vn >= 0:
             return Contact(0.0, Q[i])
         inv = 1.0 / M + (0.0 if np.isinf(blade_mass) else 1.0 / blade_mass)
-        jn = -(1 + self.params.blade_pop) * vn / inv     # normal impulse, N s
+        e = self.params.blade_pop
+        if self.params.soft_hands > 0.5:                  # soft hands: little bounce at stickhandling speeds
+            e *= float(np.clip((-vn - 0.5) / (self.params.soft_hands - 0.5), 0.0, 1.0))
+        jn = -(1 + e) * vn / inv                         # normal impulse, N s
         vt_vec = vrel - vn * n
         vt_mag = float(np.linalg.norm(vt_vec))
         J = jn * n
@@ -257,7 +265,12 @@ INCH = 0.0254
 LBF = 4.448
 FLEX_SPAN = 1.17          # m between the supports in a flex test (approximate)
 FLEX_LEVER = 0.80         # m from the bottom hand to the blade: the bending cantilever
-BLADE_MASS = 0.15         # kg: blade plus lower shaft, the part that whips
+ICE_BEND = 0.025          # m: the most the ice may bend the shaft. With no ice pushing back on the hands,
+                          # a stick held low loaded to the 0.15 m limit for free and then fired a resting
+                          # puck at 6 m/s (session 2). Past this the stick slides up through the hands,
+                          # which stores nothing.
+BLADE_MASS = 0.35         # kg: the stick's working mass at the blade, hands included (0.15 made a
+                          # touched blade bounce back and re-hit the puck: "the puck explodes off it")
 
 
 def tip_stiffness(flex: float) -> float:
@@ -277,7 +290,7 @@ class Flex:
 
     MAX_BEND = 0.15
 
-    def __init__(self, flex: float, mass: float = BLADE_MASS, damping: float = 0.10):
+    def __init__(self, flex: float, mass: float = BLADE_MASS, damping: float = 0.70):   # hands damp a stick
         self.mass = mass
         self.damping = damping
         self.set_flex(flex)
@@ -324,6 +337,34 @@ class Sim:
         self.flex = Flex(flex)
         self.bend = np.zeros(3)
         self._last = None
+        self.on_ice = False
+        self.slide = np.zeros(3)                       # the stick slid up its shaft (past the flex's limit)
+        self.events: list[tuple[str, float]] = []      # ("ice", touchdown speed m/s), drained by the app
+
+    def _hold_on_ice(self, bot_rigid: np.ndarray, anchor: np.ndarray, shaft: np.ndarray) -> np.ndarray:
+        """Keep the flexing blade on top of the ice: bend the shaft, and past the flex's limit slide
+        the stick up along its shaft (self.slide). Returns the bend."""
+        f = self.flex
+        bend = f.bend(anchor)
+        low = float((bot_rigid[:, 1] + bend[1]).min())
+        self.slide = np.zeros(3)
+        if low < 0:
+            new, self.slide = ice_rest(bend, low, shaft, ICE_BEND)
+            dv = new - bend
+            dn = float(np.linalg.norm(dv))
+            if dn > 1e-9:
+                dd = dv / dn
+                vd = float(f.v @ dd)
+                if vd < 0:                                  # stop it moving into the ice
+                    f.v = f.v - dd * vd
+            if not self.on_ice:                             # touchdown
+                self.events.append(("ice", max(0.0, float(-f.v[1]))))
+                self.on_ice = True
+            f.x = anchor + new
+            return new
+        if low > 0.003:                                     # clearly lifted off
+            self.on_ice = False
+        return bend
 
     def step(self, dt: float, rigid_bot: np.ndarray | None, rigid_top: np.ndarray | None,
              anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4) -> float:
@@ -350,10 +391,11 @@ class Sim:
             s = (k + 1) / substeps
             a_s = a0 + s * (anchor - a0)
             self.flex.step(h, a_s, v_anchor, shaft)
-            bend = self.flex.bend(a_s)
+            bot_r = b0 + s * (rigid_bot - b0)
+            bend = self._hold_on_ice(bot_r, a_s, shaft) if self.flex.x is not None else np.zeros(3)
             dv_bend = self.flex.v - v_anchor
-            bot = b0 + s * (rigid_bot - b0) + bend
-            top = t0 + s * (rigid_top - t0) + bend
+            bot = bot_r + bend + self.slide
+            top = t0 + s * (rigid_top - t0) + bend + self.slide
             p._integrate(h)
             mid = bot.mean(axis=0)
             if np.linalg.norm((mid - p.pos)[[0, 2]]) < 0.4:
@@ -365,3 +407,27 @@ class Sim:
         self.bend = self.flex.bend(anchor)
         self._last = (rigid_bot, rigid_top, anchor)
         return biggest
+
+
+def ice_rest(bend: np.ndarray, low: float, shaft: np.ndarray, max_bend: float = ICE_BEND):
+    """Lift a blade whose lowest point is `low` (m, below 0 = in the ice) back onto the ice.
+
+    First bend the shaft further (across it, toward up), up to max_bend in all; whatever is left,
+    slide the stick up along its shaft (the hands sliding down it). Returns (bend, slide)."""
+    slide = np.zeros(3)
+    if low >= 0:
+        return bend, slide
+    up = np.array([0.0, 1.0, 0.0])
+    need = -low
+    d = up - (up @ shaft) * shaft
+    dn = np.linalg.norm(d)
+    if dn > 0.2:
+        d /= dn
+        bd, bb = float(bend @ d), float(bend @ bend)
+        t_max = -bd + np.sqrt(max(bd * bd - (bb - max_bend ** 2), 0.0))   # |bend + d t| = max_bend
+        t = min(need / float(d @ up), max(t_max, 0.0))
+        bend = bend + d * t
+        need -= t * float(d @ up)
+    if need > 1e-6 and shaft @ up > 0.2:
+        slide = shaft * (need / float(shaft @ up))
+    return bend, slide
