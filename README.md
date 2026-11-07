@@ -26,8 +26,27 @@ hands. The bet is that the hard part is not the physics engine but four VR probl
 | spike | question | status |
 |---|---|---|
 | **0: tracking** ([spike0/](spike0/)) | With a controller in each hand, which virtual stick model keeps the blade steadiest, how much do the controllers drop out heads-up and mid-swing, how fast does the blade move? | recorder + analysis built and tested on synthetic data; needs a real session |
-| 1: puck sim | A 3D puck plus a physics stick on the ice, with 1 to 2 kHz substeps, swept collision, friction and flex, replaying swings recorded in Spike 0 on the desktop. Rust. | not started |
+| 1: puck sim | A 3D puck plus a physics stick on the ice, with 1 to 2 kHz substeps, swept collision, friction and flex, replaying swings recorded in Spike 0 on the desktop. Includes the **ice assist** (below), tuned on those recordings. Rust. | not started |
 | 2: in the headset | Spike 1 live in Bevy + OpenXR (the bigmark222/bevy `multiview-xr` fork has an OpenXR proof of concept). | not started |
 
 Spike 0 decides the stick model, how much the game must steady and hold the blade, and how
 fast Spike 1 has to step.
+
+## Ice assist (wanted)
+
+With no floor under the blade, the game helps keep it on the ice. The ice works like a floor,
+not a magnet:
+
+- **Floor (always on):** the blade can't go below the ice. It slides on it, and the spring
+  between the hands and the stick takes up the difference.
+- **Snap (a dial):** when the blade is within a few cm of the ice and moving sideways, it eases
+  down onto the ice. The pull fades with height.
+- **Let go:** a deliberate lift (the hands rising quickly, or the blade above the snap zone)
+  turns the snap off. Some hysteresis stops it flickering on and off. Saucers, lifts, shots and
+  batting the puck stay free.
+- **Feel:** a controller buzz that grows the harder you push into the ice, standing in for the
+  floor.
+
+To tune it: Spike 0's blade-height spread while stickhandling sizes the snap zone. Spike 1
+replays the recorded stickhandling through the assist to set the strength. Both are exposed
+as dials to tune in the headset.
