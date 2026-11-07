@@ -58,7 +58,7 @@ def test_into_our_net_from_the_front_is_an_own_goal_and_it_stays_in():
     for _ in range(2000):
         p.step(0.001)
     x, _, z = zone.to_zone(p.pos)
-    assert p.in_net and p.own_goals == 1 and "own_goal" in [e[0] for e in p.events]
+    assert p.in_net and p.nets == 1 and "net" in [e[0] for e in p.events]
     assert zn.GOAL_Z - zn.NET_DEPTH < z < zn.GOAL_Z and abs(x) < zn.NET_HALF_W
 
 
@@ -72,4 +72,4 @@ def test_the_net_is_solid_from_the_side_and_back(start, vel):
         x, _, z = zone.to_zone(p.pos)
         inside = abs(x) < zn.NET_HALF_W and zn.GOAL_Z - zn.NET_DEPTH < z < zn.GOAL_Z
         assert not inside
-    assert not p.in_net and p.own_goals == 0
+    assert not p.in_net and p.nets == 0

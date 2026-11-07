@@ -83,3 +83,53 @@ def skater(line, zone, pos, facing, color, shoots: str = "L", stride: float = 0.
     else:
         for a, b in zip(WA, WB):
             line(a, b, color)
+
+
+GOALIE = (1.0, 0.78, 0.35)
+
+
+@functools.lru_cache(maxsize=4)
+def _goalie_local(down: bool) -> tuple[np.ndarray, np.ndarray]:
+    """A goalie in his frame (forward, left, up): pads, body, glove (his left), blocker, mask,
+    stick. down: in the butterfly (pads flat on the ice, wide); else standing."""
+    A, B = [], []
+
+    def seg(a, b):
+        A.append(a)
+        B.append(b)
+
+    def rect(p0, p1, p2, p3):
+        for a, b in ((p0, p1), (p1, p2), (p2, p3), (p3, p0)):
+            seg(a, b)
+
+    for k in (1.0, -1.0):                              # pads
+        if down:
+            knee, toe = (0.08, 0.06 * k), (-0.12, 0.75 * k)
+            rect((*knee, 0.0), (*toe, 0.0), (*toe, 0.28), (*knee, 0.28))
+            seg((knee[0], knee[1], 0.14), (toe[0], toe[1], 0.14))
+        else:
+            rect((0.05, 0.05 * k, 0.0), (0.05, 0.33 * k, 0.0), (0.05, 0.33 * k, 0.8), (0.05, 0.05 * k, 0.8))
+    lo = 0.3 if down else 0.8
+    rect((0.05, 0.3, lo), (0.05, -0.3, lo), (0.05, -0.28, lo + 0.62), (0.05, 0.28, lo + 0.62))   # chest
+    hy = lo + 0.62
+    c = np.linspace(0, 2 * np.pi, 11)
+    for i in range(10):                                # glove (his left) and mask
+        seg((0.18, 0.45 + 0.15 * np.cos(c[i]), hy - 0.15 + 0.15 * np.sin(c[i])),
+            (0.18, 0.45 + 0.15 * np.cos(c[i + 1]), hy - 0.15 + 0.15 * np.sin(c[i + 1])))
+        seg((0.05, 0.12 * np.cos(c[i]), hy + 0.16 + 0.13 * np.sin(c[i])),
+            (0.05, 0.12 * np.cos(c[i + 1]), hy + 0.16 + 0.13 * np.sin(c[i + 1])))
+    rect((0.18, -0.34, hy - 0.45), (0.18, -0.54, hy - 0.45), (0.18, -0.54, hy - 0.05), (0.18, -0.34, hy - 0.05))
+    seg((0.18, -0.44, hy - 0.3), (0.35, -0.2, 0.05))   # stick: shaft from the blocker, paddle on the ice
+    rect((0.35, -0.2, 0.0), (0.35, 0.25, 0.0), (0.35, 0.25, 0.08), (0.35, -0.2, 0.08))
+    return np.array(A, dtype=float), np.array(B, dtype=float)
+
+
+def goalie(line, zone, pos, facing, down: bool = False, color=GOALIE) -> None:
+    """Draw the goalie at zone (x, z) `pos`, facing zone direction `facing`."""
+    f = np.asarray(facing, dtype=float)
+    n = float(np.linalg.norm(f))
+    f = f / n if n > 1e-6 else np.array([0.0, 1.0])
+    A, B = _goalie_local(bool(down))
+    M = np.array([zone.dir_to_world(f[0], f[1]), zone.dir_to_world(f[1], -f[0]), [0.0, 1.0, 0.0]])
+    o = zone.to_world(float(pos[0]), 0.0, float(pos[1]))
+    line.many(A @ M + o, B @ M + o, color)

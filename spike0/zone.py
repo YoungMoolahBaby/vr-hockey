@@ -127,7 +127,7 @@ class ZonePuck(pk.Puck):
         super().__init__(params, pk.Rink())
         self.zone = zone
         self.cleared = False
-        self.own_goals = 0
+        self.nets = 0                                   # pucks into the net (whose goal depends on the drill)
 
     def spawn(self, pos_xz) -> None:
         super().spawn(pos_xz)
@@ -173,8 +173,8 @@ class ZonePuck(pk.Puck):
         if pz >= front + r - 1e-6:                          # from the front
             if abs(x) < hw - r:                             # through the mouth: in our net
                 self.in_net = True
-                self.own_goals += 1
-                self.events.append(("own_goal", float(np.hypot(vx, vz))))
+                self.nets += 1
+                self.events.append(("net", float(np.hypot(vx, vz))))
             else:                                           # a post
                 z, vz = front + r, (-pr.board_bounce * vz if vz < 0 else vz)
         elif abs(px) >= hw + POST_R + r - 1e-6:             # a side of the net

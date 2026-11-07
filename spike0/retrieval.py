@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -389,13 +390,19 @@ def _f2_track(rng, post: str, mates: dict, t_commit: float) -> Track:
 
 def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ice_mu: float,
                   board_bounce: float, want: str | None = None, min_gap: float = 0.25,
-                  pass_speed: float = PASS_SPEED, decide_s: float = DECIDE_S, tries: int = 400) -> Scenario:
+                  pass_speed: float = PASS_SPEED, decide_s: float = DECIDE_S, tries: int = 400,
+                  pause_s: float = 0.0) -> Scenario:
     """A rep where `want` (or any out) is clearly the best, by at least min_gap in value, for a
-    player who passes at pass_speed about decide_s after he has the puck."""
+    player who passes at pass_speed about decide_s after he has the puck.
+
+    pause_s: sleep this long between tries. In the headset this runs beside the 1 kHz physics,
+    and a sleep hands Python's lock back to it (a try is a few ms of pure Python)."""
     blade, head = np.asarray(blade, dtype=float), np.asarray(head, dtype=float)
     keep = corner_keep(board_bounce)
     fallback = None
     for _ in range(tries):
+        if pause_s:
+            time.sleep(pause_s)
         seed = int(rng.integers(1 << 31))
         r = np.random.default_rng(seed)
         mates = {k: np.array(c) + r.uniform(-1, 1, 2) * np.array(j) for k, (c, j) in TEAMMATES.items()}
@@ -420,7 +427,7 @@ def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ic
         return fallback[1]
     return make_scenario(rng, free_time=free_time + 0.3, blade=blade, head=head, ice_mu=ice_mu,
                          board_bounce=board_bounce, want=None, min_gap=min_gap / 2, pass_speed=pass_speed,
-                         decide_s=decide_s, tries=tries)
+                         decide_s=decide_s, tries=tries, pause_s=pause_s)
 
 
 # ----------------------------------------------------------------------------- scanning
@@ -778,15 +785,22 @@ class Staircase:
         return True
 
     @classmethod
-    def load(cls, path: Path) -> "Staircase":
+    def load(cls, path: Path, key: str = "staircase") -> "Staircase":
         try:
-            saved = json.loads(Path(path).read_text())["staircase"]
+            saved = json.loads(Path(path).read_text())[key]
             return cls(**{k: saved[k] for k in ("level", "reps", "wins") if k in saved})   # steps: from the code
         except (OSError, ValueError, KeyError, TypeError):
             return cls()
 
-    def save(self, path: Path, **extra) -> None:
-        Path(path).write_text(json.dumps({"staircase": asdict(self), **extra}, indent=2))
+    def save(self, path: Path, key: str = "staircase", **extra) -> None:
+        """Into the shared state file, keeping what other drills saved there."""
+        try:
+            data = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            data = {}
+        data[key] = asdict(self)
+        data.update(extra)
+        Path(path).write_text(json.dumps(data, indent=2))
 
 
 class You:
@@ -816,9 +830,9 @@ class You:
         return {"speeds": [round(v, 2) for v in self.speeds], "decides": [round(d, 3) for d in self.decides]}
 
     @classmethod
-    def load(cls, path: Path) -> "You":
+    def load(cls, path: Path, key: str = "you") -> "You":
         try:
-            d = json.loads(Path(path).read_text())["you"]
+            d = json.loads(Path(path).read_text())[key]
             return cls(d.get("speeds", ()), d.get("decides", ()))
         except (OSError, ValueError, KeyError, TypeError):
             return cls()

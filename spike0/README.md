@@ -137,6 +137,43 @@ the ice and press A. The zone is laid out so your blade sits at the end boards, 
 
 The grips, Y fitting and left-stick tuning work as in the sandbox.
 
+## Drill: the power-play point (shoot, or set one up)
+
+```powershell
+uv run python drill.py --drill pp
+```
+
+**Setup:** face where you want the net and press A. Your blade becomes the left point.
+
+**Each rep:**
+1. Your winger on the left half wall passes the puck up to you.
+2. While it travels, the penalty-kill box commits:
+   - **F1** pressures you, which closes your shooting lane but opens the seam. Or he shades the
+     seam, which leaves your lane open.
+   - **F2** takes away D-to-D, or drops into the seam.
+   - **D1** boxes out your screen, standing in your lane. Or he plays beside your screen.
+   - **D2** steps up on your seam shooter, or stays home.
+3. Pick your play:
+   - **Shoot:** your own shot, through the screen.
+   - **D-to-D:** your partner's one-timer from the right point.
+   - **The seam:** a hard pass across the box to your shooter in the far circle.
+
+**The goalie** (`goalie.py`) is a rec goalie:
+- He plays his angle and follows the puck a beat late.
+- A screen means he picks up a shot only about 9 m out.
+- He slides across on passes and makes saves in the butterfly. His reach has a soft edge, so it's
+  never quite all or nothing.
+
+**Scoring and difficulty:**
+- Every play is valued in expected goals with that same goalie: can the pass get there, can the
+  shot get through the box, and does it beat him?
+- Goals are real. Your actual shot, or your teammate's one-timer, has to beat the goalie and get
+  into the net.
+- **Learns you:** your power-play pass speed and shot speed are learned separately from the
+  retrieval drill's.
+- **Pressure** is how soon F1 reaches you. It adapts, with the same warm-up.
+- **The map** shows each play's goal chance as a bar; green is the best.
+
 ## Findings so far
 
 Run 1 (2026-11-07, Quest 3 on cable Link):
@@ -166,5 +203,7 @@ on feel: the blade's rotation was off. So the analysis gives those recordings a 
 | `drill.py` | the drill app (a sandbox mode): lays out the zone, runs reps, draws the skaters and the after-rep map |
 | `retrieval.py` | module 1's logic, without XR: scenarios, the time-to-intercept value model, forecheckers, shoulder-check tracking, scoring, the staircase |
 | `zone.py` | the defensive zone: regulation boards with rounded corners (rims), our net, markings |
-| `figures.py` | line-drawn skaters |
+| `figures.py` | line-drawn skaters and the goalie |
+| `powerplay.py` | the power-play drill's logic: the box's reads, expected goals per play, the rep with real shots and one-timers |
+| `goalie.py` | a rec goalie: angle, screens, saves, and expected goals from the same model |
 | `tests/` | `uv run pytest`: sizing, the grab rules exact and live = replay, and the analysis recovers the synthetic truth |

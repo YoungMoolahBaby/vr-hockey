@@ -51,7 +51,8 @@ Generic brain drills and plain repetition did not carry over to real play.
 
 | # | module | status |
 |---|---|---|
-| 1 | **Scan, retrieve, first pass** ([spike0/drill.py](spike0/drill.py), [retrieval.py](spike0/retrieval.py)) | built 2026-11-07, not yet played in the headset |
+| 1 | **Scan, retrieve, first pass** ([spike0/drill.py](spike0/drill.py), [retrieval.py](spike0/retrieval.py)) | played 2026-11-07: 175 reps over 2 sessions; success 31% -> 59% after the fixes |
+| + | **Power-play point: shoot or set one up** ([powerplay.py](spike0/powerplay.py), [goalie.py](spike0/goalie.py)) | built 2026-11-07 (Jon's ask: playmaking with a goalie), not yet played |
 | 2 | Read the carrier (occlusion) | next |
 | 3 | Gap and angle 1-on-1 (the one-handed angle to the left) | |
 | 4 | 2-on-1 lane hold | |

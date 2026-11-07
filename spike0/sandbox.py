@@ -36,7 +36,6 @@ import ctypes
 import datetime as dt
 import json
 import queue
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -651,9 +650,9 @@ def main() -> None:
 
 
 def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
-    # Python hands the GIL between threads every 5 ms by default: drawing a frame would then stall
-    # the 1 kHz physics thread for up to 5 ms at a time. Hand it over every 0.5 ms instead.
-    sys.setswitchinterval(0.0005)
+    # Leave Python's GIL switch interval at its default (5 ms). A short one (0.5 ms) was tried and
+    # was worse: a busy background thread then gets the lock in the middle of each physics tick
+    # (drill 2026-11-07: 752 samples/s; off the headset: 590-850/s while a rep was prepared).
     voice = VoiceQueue(record.Voice(not args.no_voice))
     voice.start()
     sounds = Sounds(not args.no_sound)
