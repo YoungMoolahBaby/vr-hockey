@@ -20,7 +20,7 @@ from stickmath import quat_to_mat
 
 CONTROLLERS = ("l", "r")
 CTRL_FIELDS = ("flags", "px", "py", "pz", "qx", "qy", "qz", "qw",
-               "vflags", "vx", "vy", "vz", "wx", "wy", "wz")
+               "vflags", "vx", "vy", "vz", "wx", "wy", "wz", "grip")   # grip = squeeze button 0..1
 HEAD_FIELDS = ("flags", "px", "py", "pz", "qx", "qy", "qz", "qw")
 
 COLUMNS = (["t", "xr_ns", "phase"]
@@ -67,6 +67,8 @@ class Track:
             self.vflags = df[f"{dev}_vflags"].to_numpy(dtype=np.int64)
             self.v = df[[f"{dev}_vx", f"{dev}_vy", f"{dev}_vz"]].to_numpy(dtype=np.float64)
             self.w = df[[f"{dev}_wx", f"{dev}_wy", f"{dev}_wz"]].to_numpy(dtype=np.float64)
+        col = f"{dev}_grip"
+        self.grip = df[col].to_numpy(dtype=np.float64) if col in df else np.zeros(len(df))
 
     @property
     def valid(self) -> np.ndarray:

@@ -5,8 +5,12 @@ puck feel. Sense Arena trains reading the play well, but its virtual puck contro
 the complaints: the puck slips under the stick, contact registers on the wrong side, and the
 stick has to be recalibrated to stay on the ice.
 
-**You hold two controllers, never a physical stick.** The stick is virtual and built from both
-hands. The bet is that the hard part is not the physics engine but four VR problems at the blade:
+**You hold two controllers, never a physical stick.** The stick is virtual:
+- **sized from your height:** length, lie and curve
+- **fitted once in your top hand**
+- **held with the grip buttons:** either hand can hold it alone, like taking the top hand off on D
+
+The bet is that the hard part is not the physics engine but four VR problems at the blade:
 
 1. **Tracking at the blade.** The blade is about 1.4 m from the top hand. Small hand errors grow on
    the way down the shaft: about 2.5x if the shaft runs through both hands 55 cm apart, or
@@ -25,7 +29,7 @@ hands. The bet is that the hard part is not the physics engine but four VR probl
 
 | spike | question | status |
 |---|---|---|
-| **0: tracking** ([spike0/](spike0/)) | With a controller in each hand, which virtual stick model keeps the blade steadiest, how much do the controllers drop out heads-up and mid-swing, how fast does the blade move? | recorder + analysis built and tested on synthetic data; needs a real session |
+| **0: tracking** ([spike0/](spike0/)) | Holding the virtual stick with the grip buttons: how well do the controllers track (heads-up, one-handed, mid-swing), how well does the blade stay on the ice (sizes the assist), how fast does it move? | run 1: tracking 100%, jitter about 1 mm; the stick reworked to height-sized + in-hand fit + grip buttons; next: a run with the new stick |
 | 1: puck sim | A 3D puck plus a physics stick on the ice, with 1 to 2 kHz substeps, swept collision, friction and flex, replaying swings recorded in Spike 0 on the desktop. Includes the **ice assist** (below), tuned on those recordings. Rust. | not started |
 | 2: in the headset | Spike 1 live in Bevy + OpenXR (the bigmark222/bevy `multiview-xr` fork has an OpenXR proof of concept). | not started |
 

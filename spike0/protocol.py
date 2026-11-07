@@ -1,4 +1,4 @@
-"""The guided Spike 0 session (controllers in hand, no physical stick)."""
+"""The guided Spike 0 session (controllers in hand, grip buttons hold the virtual stick)."""
 
 from __future__ import annotations
 
@@ -13,23 +13,25 @@ class Phase:
     optional: bool = False
 
 
+FIT_SAY = ("Stick fitting. The stick is in your right hand. Push the right thumbstick left and right to turn "
+           "the blade, up and down to tilt the stick. Hold B and push left or right to swing it sideways. "
+           "Press A when it feels right.")
+
 PHASES = (
-    Phase("stance", 10,
-          "Stance. Hold the controllers exactly like you hold your stick, in your normal stance, "
-          "with the blade on the ice. You will not see a stick yet. Hold still."),
     Phase("stickhandle", 30,
-          "Stickhandling. Look down at the blade and keep it on the ice. "
-          "Move it side to side, slow at first, then faster."),
+          "Stickhandling. Squeeze both grip buttons to hold the stick. Look down at the blade and keep it on "
+          "the ice. Slow at first, then faster."),
     Phase("heads_up", 30,
           "Heads up. Same stickhandling, but look straight ahead, not at the stick."),
+    Phase("one_hand", 30,
+          "Top hand off. Let go with your right hand and play the stick with your left hand only, like "
+          "angling an attacker to your left. Grab the top again after the stop sound."),
     Phase("wrist_shots", 40,
-          "Wrist shots. Take six wrist shots at full speed. Pause and reset after each one."),
+          "Wrist shots, both hands on the stick. Take six at full speed. Pause and reset after each one."),
     Phase("slap_shots", 40,
-          "Slap shots. Take five slap shots at full speed, pausing between each. Keep the wrist straps on.",
+          "Slap shots. Take five at full speed, pausing between each. Keep the wrist straps on.",
           optional=True),
 )
-
-CALIBRATION = "stance"
 
 
 def select(skip_optional: bool = False, only: list[str] | None = None) -> list[Phase]:

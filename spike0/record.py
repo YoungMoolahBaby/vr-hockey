@@ -1,24 +1,30 @@
-"""Spike 0 recorder: both Quest controllers in your hands as a virtual stick, sampled at ~1 kHz.
+"""Spike 0 recorder: a virtual stick held with the controllers' grip buttons, sampled at ~1 kHz.
 
 Headset on over Link, a controller in each hand (wrist straps on), then:
 
-    uv run python record.py --notes "Quest 3, cable Link, shoots left"
-    uv run python record.py --shoots left        # left shot = right hand on top (else: the higher hand)
-    uv run python record.py --stick-length 1.45  # your stick, top grip to heel in metres (default 1.40)
+    uv run python record.py --notes "Quest 3, cable Link"
+    uv run python record.py --refit              # fit the stick in your right hand again
+    uv run python record.py --height 5'8 --shoots left --lie 5
     uv run python record.py --no-slap            # skip the slap shots
-    uv run python record.py --show-model top_hand  # which stick model the headset shows (default two_hand)
-    uv run python record.py --only stance rest   # just some phases
+    uv run python record.py --only stickhandle   # just some phases
 
-A voice (through the default audio device, i.e. the headset on Link) walks you through
-the phases. Three low beeps = get ready, high beep = go, two falling beeps = stop.
-In the headset: a floor grid as the ice (green while a phase records), each hand's axes,
-and, once your stance is measured, the virtual stick (white) with its blade (yellow).
+The stick is sized from your height (stickspec.py). The first time, the voice walks you
+through fitting it in your right hand: right thumbstick left/right turns the blade, up/down
+tilts the stick, hold B + left/right swings it sideways, A saves (stick_fit.json; reused next
+time). Then the grip buttons hold the stick: right only, both, or left only with the top hand
+off (grab.py). Each grab gives a short buzz.
+
+A voice (through the default audio device, i.e. the headset on Link) walks you through the
+phases. Three low beeps = get ready, high beep = go, two falling beeps = stop.
+In the headset: a floor grid as the ice (green while a phase records), each hand's axes (a
+green cross while that hand grips), and the stick: shaft white, blade outline yellow.
 
 Output: data/<timestamp>/rec.csv + meta.json. Then: uv run python analyze.py data/<timestamp>
 """
 
 from __future__ import annotations
 
+import _thread
 import argparse
 import collections
 import csv
@@ -39,13 +45,18 @@ from xr.utils.gl import ContextObject
 from xr.utils.gl.glfw_util import GLFWOffscreenContextProvider
 from xr.utils.matrix4x4f import GraphicsAPI, Matrix4x4f
 
+import grab
 import protocol
 import recfmt
 import stickmath
+import stickspec
 
 HERE = Path(__file__).resolve().parent
+FIT_PATH = HERE / "stick_fit.json"
 NEED_POSE = recfmt.FLAG_POS_VALID | recfmt.FLAG_ORI_VALID
 HAND = {"l": "left", "r": "right"}
+DEADZONE = 0.2
+RATES_DEG_S = {"roll": 70.0, "pitch": 40.0, "yaw": 40.0}   # at full thumbstick
 
 
 # ----------------------------------------------------------------------------- voice
@@ -87,19 +98,23 @@ class Voice:
 
 
 class Shared:
-    def __init__(self, top_override: str | None, stick_length: float | None, show_model: str = "two_hand"):
-        self.show_model = show_model
+    def __init__(self, spec: stickspec.StickSpec, fit: grab.Fit, need_fit: bool):
+        self.spec = spec
+        self.fit = fit
+        self.need_fit = need_fit
+        self.fitting = False
+        self.fit_done = threading.Event()
+        self.grab = grab.Grab(spec, fit)
         self.phase = recfmt.GAP
         self.active = False
         self.done = False
-        self.top_override = top_override
-        self.stick_length = stick_length
-        self.stick: stickmath.StickCal | None = None
+        self.squeeze = {d: 0.0 for d in recfmt.CONTROLLERS}
         self.latest_flags = {d: 0 for d in recfmt.CONTROLLERS}
-        self.calib_rows: dict[str, list] = {}   # phase label -> [(left 7-tuple|None, right 7-tuple|None)]
         self.phase_log: list[dict] = []
-        self.calibration: dict = {}
         self.t_now = 0.0
+        self.is_focused = lambda: False   # set once the session exists
+        self.ended = ""                   # why the protocol stopped
+        self.exited = False               # the main loop has left the frame loop
 
 
 # ----------------------------------------------------------------------------- sampler
@@ -160,28 +175,21 @@ class Sampler(threading.Thread):
             kernel.QueryPerformanceCounter(ctypes.byref(qpc))
             t_s = (qpc.value - qpc0) / freq
             xt = xr.convert_win32_performance_counter_to_time_khr(self.inst, qpc).value - self.lag_ns
-            phase = sh.phase
-            row = [round(t_s, 6), xt, phase]
-            calib = phase.split("#")[0] == protocol.CALIBRATION
-            poses = []
+            row = [round(t_s, 6), xt, sh.phase]
             for dev, space, loc, vel in zip(recfmt.CONTROLLERS, self.ctrl_spaces, self.loc, self.vel):
+                squeeze = round(sh.squeeze[dev], 3)
                 if self._locate(space, loc, xt):
                     f = loc._location_flags
                     po, pp = loc.pose.orientation, loc.pose.position
                     lv, av = vel.linear_velocity, vel.angular_velocity
-                    vals = (round(pp.x, 6), round(pp.y, 6), round(pp.z, 6),
-                            round(po.x, 7), round(po.y, 7), round(po.z, 7), round(po.w, 7))
-                    row += [f, *vals, vel._velocity_flags,
-                            round(lv.x, 5), round(lv.y, 5), round(lv.z, 5),
-                            round(av.x, 5), round(av.y, 5), round(av.z, 5)]
+                    row += [f, round(pp.x, 6), round(pp.y, 6), round(pp.z, 6),
+                            round(po.x, 7), round(po.y, 7), round(po.z, 7), round(po.w, 7),
+                            vel._velocity_flags, round(lv.x, 5), round(lv.y, 5), round(lv.z, 5),
+                            round(av.x, 5), round(av.y, 5), round(av.z, 5), squeeze]
                     sh.latest_flags[dev] = f
-                    poses.append(vals if (f & NEED_POSE) == NEED_POSE else None)
                 else:
-                    row += [0] * len(recfmt.CTRL_FIELDS)
+                    row += [0] * (len(recfmt.CTRL_FIELDS) - 1) + [squeeze]
                     sh.latest_flags[dev] = 0
-                    poses.append(None)
-            if calib:
-                sh.calib_rows.setdefault(phase, []).append(tuple(poses))
             if self._locate(self.head_space, self.head_loc, xt):
                 hl = self.head_loc
                 po, pp = hl.pose.orientation, hl.pose.position
@@ -204,78 +212,185 @@ class Sampler(threading.Thread):
 # ----------------------------------------------------------------------------- protocol
 
 
-def calibrate_online(shared: Shared, label: str) -> tuple[stickmath.StickCal | None, list[str]]:
-    """Fit the virtual stick to the stance just recorded."""
-    rows = [(lv, rv) for lv, rv in shared.calib_rows.get(label, []) if lv and rv]
-    n = len(shared.calib_rows.get(label, []))
-    if len(rows) < 0.6 * max(n, 1) or len(rows) < 200:
-        return None, ["both hands were not tracked for most of the stance"]
-    a = np.asarray(rows)                       # (N, 2, 7)
-    k = len(a) // 10
-    a = a[k:len(a) - k]                        # drop the settling at both ends
-    p = {"l": a[:, 0, :3], "r": a[:, 1, :3]}
-    R = {"l": stickmath.quat_to_mat(a[:, 0, 3:]), "r": stickmath.quat_to_mat(a[:, 1, 3:])}
-    top = shared.top_override or stickmath.pick_top(p["l"], p["r"])
-    bot = "r" if top == "l" else "l"
-    try:
-        cal = stickmath.calibrate_stance(R[top], p[top], R[bot], p[bot], top, 0.0, shared.stick_length)
-    except ValueError as e:
-        return None, [str(e)]
-    heel = stickmath.blade_heel("two_hand", cal, R[top], p[top], R[bot], p[bot])
-    spread = float(np.max(np.linalg.norm(heel - np.median(heel, axis=0), axis=1)))
-    return cal, stickmath.stance_problems(cal, spread)
+AWAY_LIMIT_S = 120   # out of the app (headset off, quit to home) this long ends the session
+
+
+class SessionEnded(Exception):
+    pass
+
+
+def wait_focus(shared: Shared, voice: Voice) -> None:
+    """Block while the app is not in front in the headset; give up after AWAY_LIMIT_S."""
+    if shared.is_focused():
+        return
+    print("  paused: the app is not in focus in the headset", flush=True)
+    t0 = time.time()
+    while not shared.is_focused():
+        if time.time() - t0 > AWAY_LIMIT_S:
+            raise SessionEnded(f"away from the app for {AWAY_LIMIT_S} s")
+        time.sleep(0.1)
+    voice.say("Welcome back. Continuing.")
 
 
 def run_protocol(shared: Shared, voice: Voice, phases: list[protocol.Phase]) -> None:
-    t_wait, ok_since = time.time(), None
+    try:
+        _run_protocol(shared, voice, phases)
+        voice.say("All done. Thank you. You can take the headset off.")
+        shared.ended = "completed"
+    except SessionEnded as e:
+        print(f"  ending: {e}", flush=True)
+        shared.ended = str(e)
+    shared.done = True
+    time.sleep(2.0)
+    if not shared.exited:            # the frame loop only notices `done` while the app is in focus
+        _thread.interrupt_main()
+
+
+def _run_protocol(shared: Shared, voice: Voice, phases: list[protocol.Phase]) -> None:
+    t_wait, t_start, ok_since = time.time(), time.time(), None
     while True:  # both controllers tracked for a full second
         ok = all((shared.latest_flags[d] & NEED_POSE) == NEED_POSE for d in recfmt.CONTROLLERS)
         ok_since = (ok_since or time.time()) if ok else None
         if ok_since and time.time() - ok_since > 1.0:
             break
+        if time.time() - t_start > AWAY_LIMIT_S:
+            raise SessionEnded(f"no controllers for {AWAY_LIMIT_S} s")
         if time.time() - t_wait > 15:
             missing = [HAND[d] for d in recfmt.CONTROLLERS
                        if (shared.latest_flags[d] & NEED_POSE) != NEED_POSE]
             voice.say(f"Waiting for the {' and '.join(missing)} controller. Wake it up by moving it.")
             t_wait = time.time()
         time.sleep(0.05)
-    voice.say("Both controllers found. Spike zero starts now. Each step: listen, three low beeps, "
-              "then a high beep means go. Two falling beeps mean stop.")
+    spec = shared.spec
+    voice.say(f"Both controllers found. Your stick: {spec.length_m / stickspec.INCH:.0f} inches, lie "
+              f"{spec.lie:g}, {spec.shoots} shot.")
 
-    i = 0
-    attempts: dict[str, int] = {}
-    while i < len(phases):
-        ph = phases[i]
-        attempts[ph.name] = attempts.get(ph.name, 0) + 1
-        label = ph.name if attempts[ph.name] == 1 else f"{ph.name}#{attempts[ph.name]}"
-        voice.say(ph.say)
-        time.sleep(0.5)
-        voice.get_ready()
-        start = shared.t_now
-        shared.phase, shared.active = label, True
-        time.sleep(ph.seconds)
-        shared.phase, shared.active = recfmt.GAP, False
-        shared.phase_log.append({"label": label, "name": ph.name, "start_t": start, "end_t": shared.t_now})
-        voice.stop()
+    if shared.need_fit:
+        shared.phase, shared.fitting = "fit", True
+        voice.say(protocol.FIT_SAY)
+        while not shared.fit_done.wait(0.2):
+            wait_focus(shared, voice)
+        shared.fitting, shared.phase = False, recfmt.GAP
+        shared.fit.save(FIT_PATH, spec)
+        f = shared.fit
+        voice.say(f"Saved. Blade turned {f.roll_deg:.0f}, tilted {f.pitch_deg:.0f}, swung {f.yaw_deg:.0f} degrees.")
+    else:
+        voice.say("Using your saved stick fit. Run with refit to change it.")
+    voice.say("Each step: listen, three low beeps, then a high beep means go. Two falling beeps mean stop.")
 
-        if ph.name == protocol.CALIBRATION:
-            cal, problems = calibrate_online(shared, label)
-            shared.calibration[label] = {"stick": cal.to_dict() if cal else None, "problems": problems}
-            if problems and attempts[ph.name] < 3:
-                voice.say(f"That stance did not work: {problems[0]}. Let's do it again.")
-                continue
-            if cal:
-                shared.stick = cal
-                msg = (f"Stick fitted. A {cal.length_m:.2f} metre stick from your top hand to the blade, "
-                       f"{HAND[cal.top]} hand on top. Hold your stance and the blade should sit on the ice.")
-                if problems:
-                    msg += f" It still looks off, {problems[0]}, but carrying on."
-                voice.say(msg)
-            else:
-                voice.say("No stick could be fitted. Carrying on without one.")
-        i += 1
-    voice.say("All done. Thank you. You can take the headset off.")
-    shared.done = True
+    for ph in phases:
+        attempt = 0
+        while True:                  # an interrupted step is done again
+            attempt += 1
+            label = ph.name if attempt == 1 else f"{ph.name}#{attempt}"
+            wait_focus(shared, voice)
+            voice.say(ph.say)
+            time.sleep(0.5)
+            voice.get_ready()
+            start = shared.t_now
+            shared.phase, shared.active = label, True
+            t_end, interrupted = time.time() + ph.seconds, False
+            while time.time() < t_end:
+                if not shared.is_focused():
+                    interrupted = True
+                    break
+                time.sleep(0.05)
+            shared.phase, shared.active = recfmt.GAP, False
+            shared.phase_log.append({"label": label, "name": ph.name, "start_t": start, "end_t": shared.t_now,
+                                     "interrupted": interrupted})
+            if not interrupted:
+                voice.stop()
+                break
+            print(f"  {label} interrupted; it will be redone", flush=True)
+
+
+# ----------------------------------------------------------------------------- input
+
+
+class Inputs:
+    """Grip poses, squeeze (grip button), right thumbstick, A/B, and haptics."""
+
+    PROFILE = "/interaction_profiles/oculus/touch_controller"
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        inst = ctx.instance
+        self.hand = {"l": xr.string_to_path(inst, "/user/hand/left"),
+                     "r": xr.string_to_path(inst, "/user/hand/right")}
+        both = [self.hand["l"], self.hand["r"]]
+        right = [self.hand["r"]]
+
+        def make(name, kind, subs):
+            return xr.create_action(
+                action_set=ctx.default_action_set,
+                create_info=xr.ActionCreateInfo(action_type=kind, action_name=name, localized_action_name=name,
+                                                count_subaction_paths=len(subs),
+                                                subaction_paths=(xr.Path * len(subs))(*subs)))
+
+        A = xr.ActionType
+        self.pose = make("grip_pose", A.POSE_INPUT, both)
+        self.squeeze = make("squeeze", A.FLOAT_INPUT, both)
+        self.thumb = make("thumbstick", A.VECTOR2F_INPUT, right)
+        self.a = make("a_button", A.BOOLEAN_INPUT, right)
+        self.b = make("b_button", A.BOOLEAN_INPUT, right)
+        self.haptic = make("haptic", A.VIBRATION_OUTPUT, both)
+        pairs = [(self.pose, "/user/hand/left/input/grip/pose"), (self.pose, "/user/hand/right/input/grip/pose"),
+                 (self.squeeze, "/user/hand/left/input/squeeze/value"),
+                 (self.squeeze, "/user/hand/right/input/squeeze/value"),
+                 (self.thumb, "/user/hand/right/input/thumbstick"),
+                 (self.a, "/user/hand/right/input/a/click"), (self.b, "/user/hand/right/input/b/click"),
+                 (self.haptic, "/user/hand/left/output/haptic"), (self.haptic, "/user/hand/right/output/haptic")]
+        bindings = (xr.ActionSuggestedBinding * len(pairs))(
+            *[xr.ActionSuggestedBinding(act, xr.string_to_path(inst, path)) for act, path in pairs])
+        xr.suggest_interaction_profile_bindings(
+            instance=inst,
+            suggested_bindings=xr.InteractionProfileSuggestedBinding(
+                interaction_profile=xr.string_to_path(inst, self.PROFILE),
+                count_suggested_bindings=len(pairs), suggested_bindings=bindings))
+        self.spaces = [xr.create_action_space(session=ctx.session,
+                                              create_info=xr.ActionSpaceCreateInfo(action=self.pose, subaction_path=h))
+                       for h in both]
+        self.head = xr.create_reference_space(
+            session=ctx.session,
+            create_info=xr.ReferenceSpaceCreateInfo(reference_space_type=xr.ReferenceSpaceType.VIEW))
+
+    def _info(self, action, dev):
+        return xr.ActionStateGetInfo(action=action, subaction_path=self.hand[dev])
+
+    def read(self) -> dict:
+        s = self.ctx.session
+        out = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False}
+        try:
+            for d in ("l", "r"):
+                st = xr.get_action_state_float(s, self._info(self.squeeze, d))
+                out["squeeze"][d] = float(st.current_state) if st.is_active else 0.0
+            v = xr.get_action_state_vector2f(s, self._info(self.thumb, "r"))
+            out["thumb"] = (v.current_state.x, v.current_state.y) if v.is_active else (0.0, 0.0)
+            out["a"] = bool(xr.get_action_state_boolean(s, self._info(self.a, "r")).current_state)
+            out["b"] = bool(xr.get_action_state_boolean(s, self._info(self.b, "r")).current_state)
+        except xr.XrException:
+            pass
+        return out
+
+    def buzz(self, dev: str, amplitude: float = 0.6, ms: float = 25) -> None:
+        try:
+            xr.apply_haptic_feedback(self.ctx.session, xr.HapticActionInfo(action=self.haptic,
+                                                                           subaction_path=self.hand[dev]),
+                                     xr.HapticVibration(duration=int(ms * 1e6), frequency=xr.FREQUENCY_UNSPECIFIED,
+                                                        amplitude=amplitude))
+        except xr.XrException:
+            pass
+
+
+def apply_thumbstick(fit: grab.Fit, thumb, b_held: bool, dt: float) -> grab.Fit:
+    def shaped(v):
+        m = abs(v)
+        return 0.0 if m < DEADZONE else np.sign(v) * (m - DEADZONE) / (1 - DEADZONE)
+    x, y = shaped(thumb[0]), shaped(thumb[1])
+    if b_held:
+        return grab.Fit(fit.roll_deg, fit.pitch_deg, fit.yaw_deg + x * RATES_DEG_S["yaw"] * dt)
+    return grab.Fit(fit.roll_deg + x * RATES_DEG_S["roll"] * dt, fit.pitch_deg + y * RATES_DEG_S["pitch"] * dt,
+                    fit.yaw_deg)
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -337,33 +452,39 @@ class LineRenderer:
         GL.glUseProgram(0)
 
 
-def scene(shared: Shared, poses: dict) -> np.ndarray:
-    """Ice grid, hand axes, and the virtual stick (the chosen model; top_hand while the bottom hand is lost)."""
+def scene(active: bool, spec: stickspec.StickSpec, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+    """Ice grid, hand axes (+ a green cross while gripping), and the stick with its blade outline."""
     v = []
 
     def line(a, b, c):
         v.append((*a, *c))
         v.append((*b, *c))
 
-    grid = (0.25, 0.85, 0.35) if shared.active else (0.42, 0.44, 0.5)
+    grid = (0.25, 0.85, 0.35) if active else (0.42, 0.44, 0.5)
     for k in range(-8, 9):
         x = k * 0.5
         line((x, 0, -4), (x, 0, 4), grid)
         line((-4, 0, x), (4, 0, x), grid)
     for dev, (R, p) in poses.items():
         for axis, col in ((0, (1, 0.2, 0.2)), (1, (0.2, 1, 0.2)), (2, (0.3, 0.5, 1))):
-            line(p, p + R[:, axis] * 0.08, col)
-    cal = shared.stick
-    if cal is not None and cal.top in poses:
-        Rt, pt = poses[cal.top]
-        if cal.bottom in poses:
-            Rb, pb = poses[cal.bottom]
-            heel = stickmath.blade_heel(shared.show_model, cal, Rt, pt, Rb, pb)
-        else:
-            heel = stickmath.blade_heel("top_hand", cal, Rt, pt, Rt, pt)
-        toe = heel + stickmath.BLADE_LEN * stickmath.blade_dir(cal, Rt)
-        line(pt, heel, (0.9, 0.9, 0.9))
-        line(heel, toe, (1, 0.85, 0.1))
+            line(p, p + R[:, axis] * 0.06, col)
+        if held.get(dev):
+            for axis in range(3):
+                e = np.eye(3)[axis] * 0.035
+                line(p - e, p + e, (0.2, 1.0, 0.3))
+    R, p = stick
+    if R is not None:
+        loose = state in (grab.LOOSE_TOP, grab.LOOSE_BOTTOM)     # in a hand, no grip pressed
+        shaft = (0.6, 0.66, 0.75) if loose else (0.92, 0.92, 0.92)
+        blade = (0.8, 0.65, 0.2) if loose else (1.0, 0.85, 0.1)
+        line(R @ spec.knob + p, p, shaft)
+        bottom = spec.edge(10) @ R.T + p
+        top = spec.edge(10, top=True) @ R.T + p
+        for i in range(len(bottom) - 1):
+            line(bottom[i], bottom[i + 1], blade)
+            line(top[i], top[i + 1], blade)
+        line(bottom[0], top[0], blade)
+        line(bottom[-1], top[-1], blade)
     return np.asarray(v, dtype=np.float32)
 
 
@@ -380,42 +501,6 @@ def view_matrix(pose) -> np.ndarray:
 # ----------------------------------------------------------------------------- main
 
 
-def make_actions(ctx):
-    inst = ctx.instance
-    hands = [xr.string_to_path(inst, "/user/hand/left"), xr.string_to_path(inst, "/user/hand/right")]
-    action = xr.create_action(
-        action_set=ctx.default_action_set,
-        create_info=xr.ActionCreateInfo(
-            action_type=xr.ActionType.POSE_INPUT,
-            action_name="grip_pose",
-            localized_action_name="Grip pose",
-            count_subaction_paths=len(hands),
-            subaction_paths=(xr.Path * len(hands))(*hands),
-        ),
-    )
-    for profile in ("/interaction_profiles/oculus/touch_controller",
-                    "/interaction_profiles/khr/simple_controller"):
-        bindings = (xr.ActionSuggestedBinding * 2)(
-            xr.ActionSuggestedBinding(action, xr.string_to_path(inst, "/user/hand/left/input/grip/pose")),
-            xr.ActionSuggestedBinding(action, xr.string_to_path(inst, "/user/hand/right/input/grip/pose")),
-        )
-        xr.suggest_interaction_profile_bindings(
-            instance=inst,
-            suggested_bindings=xr.InteractionProfileSuggestedBinding(
-                interaction_profile=xr.string_to_path(inst, profile),
-                count_suggested_bindings=len(bindings),
-                suggested_bindings=bindings,
-            ),
-        )
-    spaces = [xr.create_action_space(session=ctx.session,
-                                     create_info=xr.ActionSpaceCreateInfo(action=action, subaction_path=h))
-              for h in hands]
-    head = xr.create_reference_space(
-        session=ctx.session,
-        create_info=xr.ReferenceSpaceCreateInfo(reference_space_type=xr.ReferenceSpaceType.VIEW))
-    return spaces, head
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", help="run folder (default data/<timestamp>)")
@@ -423,33 +508,65 @@ def main() -> None:
     ap.add_argument("--lag-ms", type=float, default=0,
                     help="query poses this many ms in the past (0 = now; try 20 for a smoothed history)")
     ap.add_argument("--space", choices=("stage", "local"), default="stage")
-    ap.add_argument("--shoots", choices=("left", "right"),
-                    help="your shot side: left = right hand on top (default: the higher hand in the stance)")
-    ap.add_argument("--stick-length", type=float,
-                    help="your stick length, top grip to heel in metres (default %.2f)" % stickmath.DEFAULT_LENGTH)
+    ap.add_argument("--height", default="5'8\"", help="your height: 5'8\", 68in, 173cm (default 5'8\")")
+    ap.add_argument("--shoots", choices=("left", "right"), default="left",
+                    help="shot side; left = right hand on top (default left)")
+    ap.add_argument("--lie", type=float, default=5.0, help="stick lie (default 5 = shaft at 45 degrees)")
+    ap.add_argument("--stick-length", type=float, help="stick length in metres, heel to top (default 0.84 x height)")
+    ap.add_argument("--refit", action="store_true", help="fit the stick in your right hand again")
     ap.add_argument("--no-slap", action="store_true", help="skip the slap-shot phase")
-    ap.add_argument("--show-model", choices=stickmath.MODELS, default="two_hand",
-                    help="which stick model the headset shows (default two_hand)")
     ap.add_argument("--only", nargs="+", metavar="PHASE", help="run only these phases")
     ap.add_argument("--no-voice", action="store_true", help="print instructions instead of speaking them")
-    ap.add_argument("--notes", default="", help="free text saved in meta.json (headset, Link type, shot side)")
+    ap.add_argument("--notes", default="", help="free text saved in meta.json (headset, Link type)")
     args = ap.parse_args()
 
     phases = protocol.select(args.no_slap, args.only)
     run_dir = Path(args.out) if args.out else HERE / "data" / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     space_type = xr.ReferenceSpaceType.STAGE if args.space == "stage" else xr.ReferenceSpaceType.LOCAL
-    top = {"left": "r", "right": "l"}.get(args.shoots)
-
-    shared = Shared(top, args.stick_length, args.show_model)
+    spec = stickspec.from_height(stickspec.parse_height(args.height), args.shoots, args.lie, args.stick_length)
+    saved = None if args.refit else grab.Fit.load(FIT_PATH)
+    shared = Shared(spec, saved or grab.Fit(), need_fit=saved is None)
     voice = Voice(not args.no_voice)
     meta = {"created": dt.datetime.now().isoformat(timespec="seconds"), "rate_hz": args.rate,
-            "lag_ms": args.lag_ms, "space": args.space, "notes": args.notes, "shoots": args.shoots,
-            "stick_length_arg": args.stick_length, "show_model": args.show_model,
-            "protocol": [p.name for p in phases]}
+            "lag_ms": args.lag_ms, "space": args.space, "notes": args.notes, "spec": spec.to_dict(),
+            "fit_source": "saved" if saved else "fitted this run", "protocol": [p.name for p in phases]}
+    print(f"stick: {spec.length_m / stickspec.INCH:.1f} in, lie {spec.lie:g} ({spec.shaft_angle_deg:.0f} deg), "
+          f"{spec.shoots} shot; fit: {'saved ' + str(FIT_PATH) if saved else 'will be fitted'}")
+    lock = take_lock()
     try:
         record(args, phases, run_dir, space_type, shared, voice, meta)
     except xr.FormFactorUnavailableError:
         raise SystemExit("Headset not connected: put it on, start Link, then run again (xrcheck.py tells you).")
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+LOCK = HERE / "data" / ".recording.lock"
+
+
+def _alive(pid: int) -> bool:
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x1000, False, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    code = wintypes.DWORD()
+    ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+    k.CloseHandle(h)
+    return bool(ok) and code.value == 259            # STILL_ACTIVE
+
+
+def take_lock() -> Path:
+    """One recorder at a time: two OpenXR apps fight over the headset."""
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK.exists():
+        try:
+            pid = int(LOCK.read_text().strip())
+        except ValueError:
+            pid = 0
+        if pid and pid != os.getpid() and _alive(pid):
+            raise SystemExit(f"Another recorder is running (pid {pid}). Stop it first.")
+    LOCK.write_text(str(os.getpid()))
+    return LOCK
 
 
 def record(args, phases, run_dir, space_type, shared, voice, meta) -> None:
@@ -468,29 +585,51 @@ def record(args, phases, run_dir, space_type, shared, voice, meta) -> None:
         run_dir.mkdir(parents=True, exist_ok=False)
         print(f"runtime: {meta['runtime']} | system: {meta['system']} | recording to {run_dir}")
 
-        ctrl_spaces, head_space = make_actions(ctx)
+        shared.is_focused = lambda: ctx.session_state == xr.SessionState.FOCUSED
+        inputs = Inputs(ctx)
         renderer = LineRenderer()
-        sampler = Sampler(ctx, ctrl_spaces, head_space, args.rate, args.lag_ms, shared, run_dir / "rec.csv")
+        sampler = Sampler(ctx, inputs.spaces, inputs.head, args.rate, args.lag_ms, shared, run_dir / "rec.csv")
         sampler.start()
         threading.Thread(target=run_protocol, args=(shared, voice, phases), daemon=True, name="protocol").start()
 
         sync_info = xr.ActionsSyncInfo(active_action_sets=[xr.ActiveActionSet(action_set=ctx.default_action_set)])
-        disp_vel = [xr.SpaceVelocity() for _ in ctrl_spaces]
+        disp_vel = [xr.SpaceVelocity() for _ in inputs.spaces]
         disp_loc = [xr.SpaceLocation(next=v) for v in disp_vel]
-        last_status = 0.0
+        spec, g = shared.spec, shared.grab
+        top, bot = spec.top_hand, spec.bottom_hand
+        last_status, a_was = 0.0, False
         try:
             for frame_state in ctx.frame_loop():
+                inp = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False}
                 if ctx.session_state == xr.SessionState.FOCUSED:
                     xr.sync_actions(ctx.session, sync_info)
+                    inp = inputs.read()
+                for d in recfmt.CONTROLLERS:
+                    shared.squeeze[d] = inp["squeeze"].get(d, 0.0)
                 poses = {}
-                for dev, space, loc in zip(recfmt.CONTROLLERS, ctrl_spaces, disp_loc):
+                for dev, space, loc in zip(recfmt.CONTROLLERS, inputs.spaces, disp_loc):
                     r = xr.check_result(xr.raw_functions.xrLocateSpace(
                         space, ctx.space, frame_state.predicted_display_time, ctypes.byref(loc)))
                     if not r.is_exception() and (loc._location_flags & NEED_POSE) == NEED_POSE:
                         o, p = loc.pose.orientation, loc.pose.position
                         poses[dev] = (stickmath.quat_to_mat(np.array([o.x, o.y, o.z, o.w])),
                                       np.array([p.x, p.y, p.z]))
-                verts = scene(shared, poses)
+                if shared.fitting:
+                    dt_s = frame_state.predicted_display_period / 1e9 if frame_state.predicted_display_period else 1 / 72
+                    shared.fit = apply_thumbstick(shared.fit, inp["thumb"], inp["b"], dt_s)
+                    g.set_fit(shared.fit)
+                    if inp["a"] and not a_was:
+                        inputs.buzz("r", 0.8, 60)
+                        shared.fit_done.set()
+                a_was = inp["a"]
+                was = dict(g.on)
+                state, R, p = g.step(poses.get(top), poses.get(bot), shared.squeeze[top], shared.squeeze[bot],
+                                     force_top=shared.fitting)
+                for key, dev in (("t", top), ("b", bot)):
+                    if g.on[key] and not was[key]:
+                        inputs.buzz(dev)
+                held = {top: g.on["t"], bot: g.on["b"]}
+                verts = scene(shared.active, spec, poses, held, (R, p), state)
                 for view in ctx.view_loop(frame_state):
                     proj = np.asarray(Matrix4x4f.create_projection_fov(GraphicsAPI.OPENGL, view.fov, 0.05, 100.0).m)
                     clear = (0.05, 0.12, 0.07) if shared.active else (0.06, 0.06, 0.09)
@@ -499,17 +638,20 @@ def record(args, phases, run_dir, space_type, shared, voice, meta) -> None:
                 if now - last_status > 2:
                     last_status = now
                     secs = max(shared.t_now, 1e-9)
-                    print(f"  t={shared.t_now:6.1f}s  phase={shared.phase:<15} samples={sampler.n} "
-                          f"({sampler.n / secs:.0f}/s)  locate errors={sampler.errors}", flush=True)
+                    print(f"  t={shared.t_now:6.1f}s  phase={shared.phase:<12} stick={grab.STATE_NAMES[state]:<6} "
+                          f"samples={sampler.n} ({sampler.n / secs:.0f}/s)  locate errors={sampler.errors}", flush=True)
                 if shared.done:
                     break
         except KeyboardInterrupt:
-            print("stopped with Ctrl+C; saving what was recorded")
+            if not shared.done:
+                print("stopped with Ctrl+C; saving what was recorded")
         finally:
+            shared.exited = True
             sampler.stop_evt.set()
             sampler.join(timeout=5)
             meta.update(samples=sampler.n, locate_errors=sampler.errors, phases=shared.phase_log,
-                        online_calibration=shared.calibration, completed=shared.done)
+                        fit=shared.fit.to_dict(), completed=shared.ended == "completed",
+                        ended=shared.ended or "stopped")
             recfmt.write_meta(run_dir, meta)
     print(f"saved {run_dir}\nnext: uv run python analyze.py {run_dir}")
 

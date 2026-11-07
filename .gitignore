@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 spike0/data/
+spike0/stick_fit.json

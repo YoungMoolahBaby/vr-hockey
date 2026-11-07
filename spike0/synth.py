@@ -2,9 +2,10 @@
 
     uv run python synth.py data/synth            # writes rec.csv, meta.json, truth.json
 
-Two hands hold a virtual stick (heel at the origin of its frame, blade along +x, shaft up at
-a 45 degree lie): the right hand on top (a left shot), the left hand down the shaft. Each
-controller sees its own update rate (sample-and-hold), white noise, slow drift, and tracking
+A 5'8" left shot's stick (stickspec) moves through the protocol. The right (top) hand holds
+it where the fit says; the left hand sits on the shaft and slides along it. Both grips are
+held, except in one_hand where the top hand lets go and the stick rides in the left hand.
+Each controller gets its own update rate (sample-and-hold), white noise, slow drift, and
 dropouts where the runtime would dead-reckon on the IMU.
 """
 
@@ -17,35 +18,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import grab
 import protocol
 import recfmt
 import stickmath as sm
+import stickspec
 
 RATE = 1000.0
 GAP_S = 4.0
-LIE = np.radians(45)
-U = np.array([-np.cos(LIE), np.sin(LIE), 0.0])    # shaft direction in the stick frame (heel at origin)
-TOP, BOT = "r", "l"                                # left shot: right hand on top
-S_TOP, S_BOT = 1.40, 0.85                          # grips, metres up the shaft from the heel
+SPEC = stickspec.from_height(stickspec.parse_height("5'8\""), "left")
+FIT = grab.Fit(roll_deg=20.0, pitch_deg=-10.0, yaw_deg=5.0)
+TOP, BOT = SPEC.top_hand, SPEC.bottom_hand
+S_BOT = 0.80                                       # bottom grip, metres up the shaft from the heel
 SHOTS = {"wrist_shots": dict(v=14.0, T=0.22, n=6), "slap_shots": dict(v=22.0, T=0.28, n=5)}
-NOISE = {  # pos sigma m, rot sigma deg, drift m, update Hz
-    TOP: (0.0005, 0.05, 0.002, 500),
-    BOT: (0.0006, 0.06, 0.002, 500),
-}
+NOISE = {TOP: (0.0005, 0.05, 0.002, 500),          # pos sigma m, rot sigma deg, drift m, update Hz
+         BOT: (0.0006, 0.06, 0.002, 500)}
 X, Y, Z = np.eye(3)
-
-
-def expmap(r: np.ndarray) -> np.ndarray:
-    """(N, 3) rotation vectors -> (N, 3, 3) matrices."""
-    r = np.atleast_2d(r)
-    th = np.linalg.norm(r, axis=1)
-    k = np.where(th[:, None] > 1e-12, r / np.maximum(th, 1e-12)[:, None], 0.0)
-    K = np.zeros((len(r), 3, 3))
-    K[:, 0, 1], K[:, 0, 2] = -k[:, 2], k[:, 1]
-    K[:, 1, 0], K[:, 1, 2] = k[:, 2], -k[:, 0]
-    K[:, 2, 0], K[:, 2, 1] = -k[:, 1], k[:, 0]
-    s, c = np.sin(th)[:, None, None], np.cos(th)[:, None, None]
-    return np.eye(3) + s * K + (1 - c) * (K @ K)
+expmap = sm.expmap
 
 
 def rot(axis, angles) -> np.ndarray:
@@ -58,15 +47,12 @@ def ease(x):
 
 
 def gen_stick(name: str, tau: np.ndarray):
-    """Stick pose (R_ws, p_ws = world position of the heel) and the bottom grip's place on the shaft."""
+    """Stick pose (R_ws, p_ws = the heel) and the bottom grip's place on the shaft."""
     n = len(tau)
     two_pi = 2 * np.pi
+    u = SPEC.u
     s_bot = np.full(n, S_BOT)
-    if name == "stance":
-        R = rot(Y, 0.004 * np.sin(two_pi * 0.3 * tau))
-        p = np.stack([0.002 * np.sin(two_pi * 0.2 * tau), np.zeros(n), np.full(n, -0.3)], axis=1)
-        return R, p, s_bot
-    if name in ("stickhandle", "heads_up"):
+    if name in ("stickhandle", "heads_up", "one_hand"):
         T = tau[-1] if n > 1 else 1.0
         f = 0.8 + 2.2 * tau / T
         phi = two_pi * np.cumsum(f) / RATE
@@ -74,11 +60,13 @@ def gen_stick(name: str, tau: np.ndarray):
         m = np.mod(tau, 3.7)
         lift = np.where(m < 0.15, 0.02 * np.sin(np.pi * m / 0.15), 0.0)
         p = np.stack([0.1 + 0.05 * np.sin(phi), lift, -0.2 + 0.30 * np.sin(phi)], axis=1)
-        return R, p, S_BOT + 0.08 * np.sin(phi + 1.0)          # the bottom hand slides on the shaft
+        if name != "one_hand":
+            s_bot = S_BOT + 0.08 * np.sin(phi + 1.0)              # the bottom hand slides on the shaft
+        return R, p, s_bot
     if name in SHOTS:
         sp = SHOTS[name]
-        H_s = 1.8 * U                                           # the swing turns about the shoulders
-        r = np.linalg.norm(H_s[1:])                             # heel's arc radius about the x axis through H
+        H_s = 1.8 * u                                           # the swing turns about the shoulders
+        r = np.linalg.norm((SPEC.sweet - H_s)[1:])
         th_tot = sp["v"] * sp["T"] / (2 * r)
         cycle = (tau[-1] + 1e-3) / sp["n"]
         k = np.minimum((tau // cycle).astype(int), sp["n"] - 1)
@@ -90,31 +78,26 @@ def gen_stick(name: str, tau: np.ndarray):
                       th_tot / 2 * (1 - ease((tc - 1.5 - T) / 1.5))))
         R = rot(X, th)
         c = np.array([0.0, 0.0, -0.3])
-        p = (c + H_s) - R @ H_s
-        return R, p, s_bot
+        return R, (c + H_s) - R @ H_s, s_bot
     raise ValueError(name)
 
 
 def angular_velocity(R, t):
-    """World-frame angular velocity from a rotation sequence (central differences)."""
     W = np.gradient(R, t, axis=0) @ np.transpose(R, (0, 2, 1))
     return np.stack([(W[:, 2, 1] - W[:, 1, 2]) / 2, (W[:, 0, 2] - W[:, 2, 0]) / 2,
                      (W[:, 1, 0] - W[:, 0, 1]) / 2], axis=1)
 
 
-def head_pose(n, target, forward_only):
-    pos = np.array([-0.9, 1.65, 0.35])
-    f = np.array([1.0, -0.05, 0.0]) if forward_only else target - pos
+def head_pose(n, forward_only):
+    pos = np.array([-0.9, 1.6, 0.35])
+    f = np.array([1.0, -0.05, 0.0]) if forward_only else np.array([0.1, 0.0, -0.2]) - pos
     f = f / np.linalg.norm(f)
-    right = np.cross(f, [0, 1, 0])
-    right /= np.linalg.norm(right)
-    up = np.cross(right, f)
-    R = np.stack([right, up, -f], axis=1)
+    right = sm.unit(np.cross(f, [0, 1, 0]))
+    R = np.stack([right, np.cross(right, f), -f], axis=1)
     return np.repeat(sm.mat_to_quat(R)[None], n, axis=0), np.tile(pos, (n, 1))
 
 
 def blend(R0, p0, R1, p1, n):
-    """Smooth move between two poses (the gaps between phases)."""
     s = ease(np.linspace(0, 1, n))
     q0, q1 = sm.mat_to_quat(R0), sm.mat_to_quat(R1)
     if np.dot(q0, q1) < 0:
@@ -126,57 +109,63 @@ def blend(R0, p0, R1, p1, n):
 
 def synthesize(out_dir: Path, seed: int = 1) -> dict:
     rng = np.random.default_rng(seed)
-    grip = {TOP: expmap(rng.normal(size=(1, 3)) * 1.0)[0], BOT: expmap(rng.normal(size=(1, 3)) * 1.0)[0]}
+    R_ts, p_ts = grab.hold(SPEC, FIT)
+    G_b = expmap(rng.normal(size=(1, 3)))[0]           # how the bottom controller sits on the shaft
     wobble_axis = sm.unit(rng.normal(size=3))
-    start = {TOP: (expmap(rng.normal(size=(1, 3)))[0], np.array([-0.6, 0.9, 0.3])),     # hands at the sides
-             BOT: (expmap(rng.normal(size=(1, 3)))[0], np.array([-0.6, 0.9, -0.2]))}
     phases = protocol.select()
 
-    hands = {d: {"R": [], "p": []} for d in (TOP, BOT)}
-    heel_true, labels, heads_q, heads_p, phase_log = [], [], [], [], []
+    sticks_R, sticks_p, s_bots, labels, grip_top, heads_q, heads_p, phase_log = [], [], [], [], [], [], [], []
     lead = int(GAP_S * RATE)
-    last = {d: start[d] for d in (TOP, BOT)}             # each hand's last pose (R, p)
+    prev = None
     t_cursor = 0.0
     for ph in phases:
         n = int(ph.seconds * RATE)
         tau = np.arange(n) / RATE
-        R_ws, p_ws, s_bot = gen_stick(ph.name, tau)
-        wob = rot(wobble_axis, 0.12 * np.sin(2 * np.pi * 0.4 * tau))          # the bottom hand is not glued on
-        cur = {TOP: (R_ws @ grip[TOP], p_ws + R_ws @ (S_TOP * U)),
-               BOT: (R_ws @ grip[BOT] @ wob, p_ws + np.einsum("nij,nj->ni", R_ws, s_bot[:, None] * U))}
-        heel = p_ws
-        for d in (TOP, BOT):
-            gR, gp = blend(last[d][0], last[d][1], cur[d][0][0], cur[d][1][0], lead)
-            hands[d]["R"] += [gR, cur[d][0]]
-            hands[d]["p"] += [gp, cur[d][1]]
-            last[d] = (cur[d][0][-1], cur[d][1][-1])
-        heel_true += [np.full((lead, 3), np.nan), heel]
+        R, p, sb = gen_stick(ph.name, tau)
+        gR, gp = blend(*(prev or (R[0], p[0] + [0, 0.3, 0])), R[0], p[0], lead)    # the stick moves between steps
+        sticks_R += [gR, R]
+        sticks_p += [gp, p]
+        s_bots += [np.full(lead, sb[0]), sb]
         labels += [recfmt.GAP] * lead + [ph.name] * n
+        grip_top += [np.ones(lead), np.zeros(n) if ph.name == "one_hand" else np.ones(n)]
         for lab, m in ((recfmt.GAP, lead), (ph.name, n)):
-            hq, hp = head_pose(m, np.array([0.1, 0.0, -0.2]), lab == "heads_up")
+            hq, hp = head_pose(m, lab == "heads_up")
             heads_q.append(hq)
             heads_p.append(hp)
         start = t_cursor + lead / RATE
         phase_log.append({"label": ph.name, "name": ph.name, "start_t": start, "end_t": start + n / RATE})
         t_cursor = start + n / RATE
-    heel_true = np.concatenate(heel_true)
-    N = len(heel_true)
-    t = np.arange(N) / RATE
+        prev = (R[-1], p[-1])
+    R_s, p_s = np.concatenate(sticks_R), np.concatenate(sticks_p)
+    s_bot = np.concatenate(s_bots)
     labels = np.array(labels, dtype=object)
-    clean = {d: (np.concatenate(hands[d]["R"]), np.concatenate(hands[d]["p"])) for d in (TOP, BOT)}
+    N = len(R_s)
+    t = np.arange(N) / RATE
+
+    # the hands that hold this stick
+    R_t = R_s @ R_ts.T
+    p_t = p_s - np.einsum("nij,j->ni", R_t, p_ts)
+    wob_angle = np.where(np.isin(labels, ["stickhandle", "heads_up", "wrist_shots", "slap_shots"]),
+                         0.12 * np.sin(2 * np.pi * 0.4 * t), 0.0)
+    R_b = R_s @ G_b @ rot(wobble_axis, wob_angle)
+    p_b = p_s + np.einsum("nij,nj->ni", R_s, s_bot[:, None] * SPEC.u)
+    clean = {TOP: (R_t, p_t), BOT: (R_b, p_b)}
+    grips = {TOP: np.concatenate(grip_top), BOT: np.ones(N)}
 
     cols: dict[str, np.ndarray] = {"t": t, "xr_ns": (t * 1e9).astype(np.int64) + 10**14, "phase": labels}
-    truth: dict = {"top": TOP, "length_m": S_TOP, "hand_sep_m": S_TOP - S_BOT, "rate_hz": RATE,
-                   "controllers": {}, "shots": {}, "models": {}}
-
-    speed = np.full(N, np.nan)
-    ok = ~np.isnan(heel_true[:, 0])
-    speed[ok] = np.linalg.norm(np.gradient(heel_true[ok], t[ok], axis=0), axis=1)
+    edge = SPEC.edge(8)
+    low_true = (np.einsum("nij,kj->nki", R_s, edge)[..., 1] + p_s[:, None, 1]).min(axis=1) * 1000
+    sweet_true = np.einsum("nij,j->ni", R_s, SPEC.sweet) + p_s
+    speed = np.linalg.norm(np.gradient(sweet_true, t, axis=0), axis=1)
+    truth: dict = {"spec": SPEC.to_dict(), "fit": FIT.to_dict(), "phases": {}, "shots": {}, "controllers": {}}
+    for ph in ("stickhandle", "heads_up", "one_hand"):
+        h = low_true[labels == ph]
+        truth["phases"][ph] = {"height_median_mm": float(np.median(h)),
+                               "near_ice_pct": float(np.mean(np.abs(h) <= 25.4) * 100)}
     for name, sp in SHOTS.items():
         sel = np.flatnonzero(labels == name)
         truth["shots"][name] = [float(c.max()) for c in np.array_split(speed[sel], sp["n"])]
 
-    noisy = {}
     for d in (TOP, BOT):
         pos_sigma, rot_sigma, drift_amp, hz = NOISE[d]
         R_c, p_c = clean[d]
@@ -197,7 +186,7 @@ def synthesize(out_dir: Path, seed: int = 1) -> dict:
             lost |= (labels == "heads_up") & (np.mod(t, 2.0) < 0.6)
             for name in SHOTS:
                 sel = np.flatnonzero(labels == name)
-                lost[sel[speed[sel] > 0.7 * np.nanmax(speed[sel])]] = True
+                lost[sel[speed[sel] > 0.7 * speed[sel].max()]] = True
         err = np.zeros((N, 3))
         if lost.any():
             starts = np.flatnonzero(lost & ~np.concatenate([[False], lost[:-1]]))
@@ -208,7 +197,6 @@ def synthesize(out_dir: Path, seed: int = 1) -> dict:
                 err[s0:s1 + 1] = 0.5 * np.outer(dt_ ** 2, acc)
         R_n = noise_r @ R_c[src]
         p_n = p_c[src] + noise_p + drift[src] + err[src]
-        noisy[d] = (R_n, p_n)
         q_n = sm.mat_to_quat(R_n)
         cols[f"{d}_flags"] = np.where(lost, recfmt.FLAG_POS_VALID | recfmt.FLAG_ORI_VALID, 0xF)
         for j, ax in enumerate("xyz"):
@@ -219,24 +207,8 @@ def synthesize(out_dir: Path, seed: int = 1) -> dict:
         for j, ax in enumerate("xyz"):
             cols[f"{d}_v{ax}"] = v_c[src][:, j] + rng.normal(scale=0.01, size=N)
             cols[f"{d}_w{ax}"] = w_c[src][:, j] + rng.normal(scale=0.01, size=N)
+        cols[f"{d}_grip"] = grips[d]
         truth["controllers"][d] = {"hand": "top" if d == TOP else "bottom", "update_hz": hz}
-
-    # truth for the stick models: the true fit (clean stance) and the analysis' own statistics
-    def mid(name):
-        e = next(x for x in phase_log if x["name"] == name)
-        span = e["end_t"] - e["start_t"]
-        return (t >= e["start_t"] + 0.1 * span) & (t < e["end_t"] - 0.1 * span)
-
-    st, sh = mid("stance"), labels == "stickhandle"
-    cal = sm.calibrate_stance(clean[TOP][0][st], clean[TOP][1][st], clean[BOT][0][st], clean[BOT][1][st], TOP)
-    truth["stick"] = cal.to_dict()
-    for model in sm.MODELS:
-        hs = sm.blade_heel(model, cal, noisy[TOP][0][st], noisy[TOP][1][st], noisy[BOT][0][st], noisy[BOT][1][st])
-        hh = sm.blade_heel(model, cal, noisy[TOP][0][sh], noisy[TOP][1][sh], noisy[BOT][0][sh], noisy[BOT][1][sh])
-        truth["models"][model] = {
-            "hold_heel_std_mm": float(np.sqrt(np.sum(np.var(hs, axis=0))) * 1000),
-            "stickhandle_height_median_mm": float(np.median(hh[:, 1]) * 1000),
-        }
 
     hq, hp = np.concatenate(heads_q), np.concatenate(heads_p)
     cols["h_flags"] = np.full(N, 0xF)
@@ -249,9 +221,9 @@ def synthesize(out_dir: Path, seed: int = 1) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(cols)[recfmt.COLUMNS].to_csv(out_dir / "rec.csv", index=False, float_format="%.7g")
     recfmt.write_meta(out_dir, {"synthetic": True, "seed": seed, "rate_hz": RATE, "lag_ms": 0, "space": "stage",
-                                "runtime": "synth", "system": "synth", "shoots": None, "stick_length_arg": None,
-                                "notes": "synthetic: right hand on top (left shot)", "phases": phase_log,
-                                "completed": True})
+                                "runtime": "synth", "system": "synth", "spec": SPEC.to_dict(), "fit": FIT.to_dict(),
+                                "fit_source": "synthetic", "notes": "synthetic: 5'8\" left shot",
+                                "phases": phase_log, "completed": True})
     (out_dir / "truth.json").write_text(json.dumps(truth, indent=2))
     return truth
 
