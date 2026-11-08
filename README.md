@@ -1,5 +1,10 @@
 # vr-hockey
 
+![The sandbox in the headset: a virtual stick held with two Quest 3 controllers, stickhandling a puck and shooting at the net](docs/media/sandbox.gif)
+
+*The sandbox in the headset (the mirror view): a virtual stick held with two Quest 3
+controllers, stickhandling a puck and shooting at the net.*
+
 A VR hockey trainer whose stick and puck physics feel right, aiming past Sense Arena on
 puck feel. Sense Arena trains reading the play well, but its virtual puck control draws
 the complaints: the puck slips under the stick, contact registers on the wrong side, and the
