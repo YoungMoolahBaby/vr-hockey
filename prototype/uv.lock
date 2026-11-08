@@ -676,7 +676,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vr-hockey-spike0"
+name = "vr-hockey-prototype"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

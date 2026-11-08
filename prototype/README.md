@@ -1,12 +1,19 @@
-# Spike 0: a virtual stick held with the controllers. Tracking, blade control, speed
+# The Python prototype
 
-You hold a Quest controller in each hand (no physical stick). The stick is virtual:
+Everything runs from here (Python, OpenXR via pyopenxr, a Quest 3 on Link):
+- **The Spike 0 tracking recorder:** `record.py`, with `analyze.py` reporting on a recording.
+- **The free-play [sandbox](#sandbox):** your stick, a puck and a net.
+- **The hockey-sense drills:** [retrieval](#drill-scan-retrieve-first-pass) and the
+  [power-play point](#drill-the-power-play-point-shoot-or-set-one-up).
+
+You hold a Quest controller in each hand (no physical stick, ever). The stick is virtual:
 - **Sized from your height** (`stickspec.py`): length, lie and a curved blade.
 - **Fitted once in your right (top) hand** with the thumbstick.
 - **Held with the grip buttons** (the middle-finger squeeze), so either hand can hold it.
 
-A guided session of about 4 minutes records both controllers, their grip buttons and the
-headset at about 1 kHz.
+The recorder's guided session of about 4 minutes records both controllers, their grip buttons
+and the headset at about 1 kHz. The sandbox and drills record the same way, plus the puck and
+every event.
 
 ## The stick
 
@@ -52,7 +59,8 @@ Sources:
 
 ## Setup
 
-1. Wrist straps on. Clear about 3 x 3 m (shots swing wide).
+1. Wrist straps on. The recorder's shots want about 3 x 3 m clear; the sandbox and drills work
+   standing in place.
 2. Draw a room-scale boundary. Its floor becomes the virtual ice.
 3. Use a Link cable if you have one.
 4. A voice guides you through the default Windows audio device. Set the headset (Oculus Virtual
@@ -61,7 +69,7 @@ Sources:
 ## Run
 
 ```powershell
-cd C:\dev\vr-hockey\spike0
+cd C:\dev\vr-hockey\prototype
 uv run python xrcheck.py          # runtime, extensions, and whether the headset is connected
 uv run python record.py --notes "Quest 3, cable Link"
 ```
@@ -90,6 +98,40 @@ uv run python analyze.py data\<timestamp>
 
 This writes `data\<timestamp>\report\report.md`, `summary.json` and two plots. Or just tell
 Claude the folder name.
+
+## Sandbox
+
+```powershell
+uv run python sandbox.py
+uv run python sandbox.py --fresh      # start from the defaults, not your saved settings
+```
+
+Your stick, a puck and a net, laid out in front of you. Play, and tune everything as you go.
+
+**Controls:**
+- **Grip buttons:** hold the stick (as above).
+- **Left stick left/right:** pick a setting. The voice says which, and its value.
+- **Left stick up/down:** change it (hold to keep changing).
+- **X:** a new puck, on your blade.
+- **Y:** fit the stick in your hand. The right stick turns and tilts it; hold B and push to swing
+  it; A saves the fit; Y again leaves without saving.
+- **Hold the left stick in (1 s):** put the net straight in front of you again.
+- **B:** say the current setting again.
+- **A:** save the settings (`sandbox_settings.json`, used by the drills too).
+
+**Settings:**
+- stick length, lie, curve depth, face open, flex
+- forgiveness (extra reach for catching the puck)
+- puck weight, ice friction
+- blade pop, blade grip
+- buzz strength
+
+**What you hear and feel:**
+- **Sounds:** a tap when the blade lands, a dull "thock" off the puck, a ping off the posts, a
+  thud off the boards.
+- **Buzz:** every puck contact buzzes the hands holding the stick, harder hits for longer.
+
+The voice calls each shot's speed in mph.
 
 ## Drill: scan, retrieve, first pass
 
@@ -186,6 +228,35 @@ Run 1 (2026-11-07, Quest 3 on cable Link):
 That run (and the cancelled run 2) used an earlier stick fitted to a still stance. It was rejected
 on feel: the blade's rotation was off. So the analysis gives those recordings a tracking-only report.
 
+**Sandbox:** 5 sessions on 2026-11-07, tuned live. Each fix answered what Jon felt:
+- A real blade curve.
+- Shaft flex "with forgiveness like golf clubs".
+- Ice sounds ("way better with the sounds").
+- The blade kept on top of the ice.
+- Consistent grips.
+- No more exploding puck: the ice no longer loads the flex.
+- "A rubber heavy puck against a light flexible composite stick" instead of an air-hockey puck.
+
+**Retrieval drill:**
+
+| | reps | success | good reads | note |
+|---|---|---|---|---|
+| Session 1 | 57 | 31% | 46% | Most misses were rims along the boards that never touched the blade. The winger stood off the wall. |
+| Session 2 | 118 | 59% | 71% | After the fixes: rim assist, winger on the wall, his own pass speed, warm-up. The free time reached 1.35 s. |
+
+**Power-play drill, session 1:** 138 reps, 0 goals.
+- 20% of incoming passes not controlled.
+- 8 of 17 shots wide.
+- All 6 seam passes picked off.
+
+Next: tuning, after the feel research (`../reports/`).
+
+**Physics rate:** the 1 kHz physics shares Python's GIL with drawing and building reps.
+- Session 1: 902/s.
+- Session 2: 752/s, after a too-short GIL switch interval (reverted).
+- Power-play session: about 920/s.
+- Off the headset, a contention harness measures 999/s.
+
 ## Files
 
 | file | what |
@@ -200,10 +271,13 @@ on feel: the blade's rotation was off. So the analysis gives those recordings a 
 | `xrcheck.py` | runtime and headset check |
 | `sandbox.py` | free play: the stick, a puck and a net, with settings tuned in the headset; its physics tick, drawing and frame loop are reused by the drills |
 | `puck.py` | the puck, the blade contact, the shaft flex, the ice |
+| `sounds.py` | the synthesized sounds (tap, thock, ping, thud, go, whistle) |
+| `stickmath.py` | rotations and quaternions |
+| `replay.py`, `touches.py` | replay a recorded session's hands through the physics; measure every blade-puck touch (does the puck leave faster than the blade?) |
 | `drill.py` | the drill app (a sandbox mode): lays out the zone, runs reps, draws the skaters and the after-rep map |
 | `retrieval.py` | module 1's logic, without XR: scenarios, the time-to-intercept value model, forecheckers, shoulder-check tracking, scoring, the staircase |
 | `zone.py` | the defensive zone: regulation boards with rounded corners (rims), our net, markings |
 | `figures.py` | line-drawn skaters and the goalie |
 | `powerplay.py` | the power-play drill's logic: the box's reads, expected goals per play, the rep with real shots and one-timers |
 | `goalie.py` | a rec goalie: angle, screens, saves, and expected goals from the same model |
-| `tests/` | `uv run pytest`: sizing, the grab rules exact and live = replay, and the analysis recovers the synthetic truth |
+| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing |

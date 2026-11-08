@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-spike0/data/
-spike0/stick_fit.json
-spike0/sandbox_settings.json
-spike0/drill_state.json
+prototype/data/
+prototype/stick_fit.json
+prototype/sandbox_settings.json
+prototype/drill_state.json
