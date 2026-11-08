@@ -75,6 +75,11 @@ Replaying recorded swings through the physics (`replay.py`, `touches.py`) checks
 
 ## Hockey sense
 
+![The retrieval drill: behind our net, the D partner by the boards, and the best pass drawn in green after the rep](docs/media/retrieval.gif)
+
+*The retrieval drill (module 1), seen from behind our net. After the rep, the green line shows
+the best pass, here to the D partner by the boards.*
+
 Deep research ([reports/VR hockey sense training.md](reports/VR%20hockey%20sense%20training.md))
 set what to build on top of the physics stick. Sense Arena has only 14 defense drills. The
 studies favour training that:
