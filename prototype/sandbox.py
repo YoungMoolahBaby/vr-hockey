@@ -53,7 +53,8 @@ import recfmt
 import record
 import stickmath
 import stickspec
-from sounds import Sounds
+import audio
+from contacts import Bus, Contact
 from stickspec import INCH
 
 HERE = Path(__file__).resolve().parent
@@ -164,7 +165,8 @@ class Play:
         self.stick_state = grab.NONE
         self.last_focus = time.time()
         self.fitting = False                   # Y: the stick held in the right hand while you fit it
-        self.sounds: queue.SimpleQueue = queue.SimpleQueue()
+        self.sounds: queue.SimpleQueue = queue.SimpleQueue()   # sounds by name (go, whistle, a hit)
+        self.bus = Bus()                       # every contact, from the physics: the sound and buzz play from it
 
     def retune(self) -> None:
         self.spec = self.tuning.spec()
@@ -349,18 +351,24 @@ class Physics:
         return [spec.top_hand if h == "top" else spec.bottom_hand for h in HOLDERS.get(state, ())]
 
     def _feel(self, imp: float, state: int) -> None:
-        """Sounds and buzz for the blade on the ice and the puck off the blade."""
+        """Every contact onto the contact bus (the sound plays from there), and the buzz."""
         pl, sim = self.play, self.play.sim
         hands_now = self._hands(state)
         buzz_level = pl.tuning.values["buzz"]
+        now = time.perf_counter()
         for kind, speed in sim.events:                   # the blade landing on the ice
-            if kind == "ice" and speed > 0.15:
-                pl.sounds.put(("tap", float(np.clip(speed / 2.0, 0, 1))))
-                if hands_now and buzz_level > 0:
+            if kind == "ice":
+                pl.bus.publish(Contact(now, "ice", speed, hands=tuple(hands_now)))
+                if speed > 0.15 and hands_now and buzz_level > 0:
                     pl.haptics.put((0.12 * buzz_level + 0.05, hands_now, 10))
         sim.events.clear()
-        if imp > 0.3:
-            pl.sounds.put(("clack", float(np.clip(imp / 8.0, 0, 1))))
+        if imp > 0.15:
+            c = getattr(sim, "contact", None)            # the compiled physics says where and how
+            pl.bus.publish(Contact(now, "puck", imp, float(c[2]) if c is not None else 0.0,
+                                   float(c[3]) if c is not None else 0.5, tuple(hands_now)))
+        scr = getattr(sim, "scrape", None)
+        if scr is not None:
+            pl.bus.scrape = (float(scr[0]), float(scr[1]))
         # feel: every contact buzzes the hands holding the stick
         if imp > 0.15 and (self.last_t - self.last_buzz > 0.02 or imp > 3.0):
             self.last_buzz = self.last_t
@@ -386,17 +394,16 @@ class Physics:
                 self.shots.append(round(mph, 1))
                 self.log.event(t, "shot", mph=round(mph, 1), ms=round(self.shot[1], 2))
             self.shot = None
+        now = time.perf_counter()
         for kind, speed in pz.events:
             self.log.event(t, kind, ms=round(speed, 2))
+            pl.bus.publish(Contact(now, kind, speed))          # posts, boards, goals: the sound plays from the bus
             if kind == "goal":
                 self.voice.say(f"Goal! {pz.goals}", key="goal")
                 pl.haptics.put((1.0, [spec.top_hand, spec.bottom_hand], 80))
                 self.respawn_at = t + 2.0
             elif kind == "post" and speed > 2:
                 self.voice.say("Post!", key="post")
-                pl.sounds.put(("ping", 1.0))
-            elif kind == "boards" and speed > 1:
-                pl.sounds.put(("thud", float(np.clip(speed / 12.0, 0, 1))))
         pz.events.clear()
         # a puck that's out of reach and stopped comes back
         u, _, w = pz.rink.to_rink(pz.pos)
@@ -630,6 +637,7 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true", help="ignore sandbox_settings.json and start from defaults")
     ap.add_argument("--no-voice", action="store_true")
     ap.add_argument("--no-sound", action="store_true", help="no ice / puck sounds")
+    ap.add_argument("--audio-device", default="Oculus", help="part of the output device's name (default: the Quest over Link)")
     ap.add_argument("--notes", default="")
     args = ap.parse_args()
 
@@ -655,7 +663,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
     # (drill 2026-11-07: 752 samples/s; off the headset: 590-850/s while a rep was prepared).
     voice = VoiceQueue(record.Voice(not args.no_voice))
     voice.start()
-    sounds = Sounds(not args.no_sound)
+    sounds = audio.Mixer(play.bus, enabled=not args.no_sound, device=getattr(args, "audio_device", "Oculus"))
+    if sounds.start():
+        print(f"  audio: mixer on {sounds.device_name} at {sounds.rate} Hz, block {sounds.block}", flush=True)
+    else:
+        sounds = audio.WinsoundSink(play.bus, not args.no_sound)
     provider = GLFWOffscreenContextProvider()
     with ContextObject(
         context_provider=provider,
@@ -678,6 +690,9 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
         sampler = record.Sampler(ctx, inputs.spaces, inputs.head, 1000, 0, play, run_dir / "rec.csv")
         mode = mode_cls(play, voice, log)
         physics = mode.make_physics()
+        if pk.FAST:                                  # compile (first run) or load the physics before the loop
+            import physics_core
+            print(f"  physics compiled/loaded in {physics_core.warm():.1f} s", flush=True)
         sampler.on_tick = physics
         sampler.start()
 
@@ -797,10 +812,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 top, bot = play.spec.top_hand, play.spec.bottom_hand
                 state, R, p = dgrab.step(poses.get(top), poses.get(bot), play.squeeze[top], play.squeeze[bot], now,
                                          force_top=play.fitting)
-                snd = []
-                while not play.sounds.empty():
-                    snd.append(play.sounds.get_nowait())
-                sounds.play_most_important(snd)
+                while not play.sounds.empty():                # by name; contacts play straight off the bus
+                    name, strength = play.sounds.get_nowait()
+                    sounds.play(name, strength)
+                if isinstance(sounds, audio.WinsoundSink):
+                    sounds.frame()
                 buzz: dict = {}
                 while not play.haptics.empty():
                     amp, hands, ms = play.haptics.get_nowait()
@@ -817,8 +833,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     renderer.draw(verts, proj @ record.view_matrix(view.pose), (0.05, 0.06, 0.09))
                 if now - last_status > 2:
                     last_status = now
+                    st = sounds.stats
+                    au = (f"audio {sounds.latency_ms:.0f} ms late {st.get('late', 0)} under {st.get('underruns', 0)}"
+                          if st else "audio winsound")
                     print(f"  t={play.t_now:6.1f}s  samples/s={sampler.n / max(play.t_now, 1e-9):.0f}  "
-                          f"stick={grab.STATE_NAMES[play.stick_state]:<12} {mode.status()}  "
+                          f"stick={grab.STATE_NAMES[play.stick_state]:<12} {mode.status()}  {au}  "
                           f"setting: {tu.describe()}", flush=True)
         except KeyboardInterrupt:
             print("stopped with Ctrl+C")
@@ -828,8 +847,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
             meta.update(samples=sampler.n, settings_end=dict(play.tuning.values), spec=play.spec.to_dict(),
                         fit=play.fit.to_dict(), params=play.params.to_dict(), phases=[], completed=True,
                         ended="quit", **mode.meta())
+            meta["audio"] = {"device": sounds.device_name, "latency_ms": round(sounds.latency_ms, 1)
+                             if sounds.latency_ms == sounds.latency_ms else None, **sounds.stats}
             recfmt.write_meta(run_dir, meta)
             mode.close()
+            sounds.close()
             log.close()
     print(f"saved {run_dir}")
 

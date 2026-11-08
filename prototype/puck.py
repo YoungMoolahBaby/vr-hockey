@@ -332,6 +332,11 @@ class Flex:
 # ----------------------------------------------------------------------------- the whole sim
 
 
+FAST = True                # Sim.step runs compiled (physics_core.py); False: the Python reference
+_NO_EDGE = np.zeros((1, 3))
+_NO_VEC = np.zeros(3)
+
+
 class Sim:
     """The stick (rigid from the hands, plus flex at the blade), the puck, the rink, the net."""
 
@@ -365,7 +370,79 @@ class Sim:
              anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4) -> float:
         """Advance dt with the rigid blade edges at the end of the step (None: no stick).
         anchor: the blade point the flex hangs on (world); shaft: unit shaft direction.
-        Returns the biggest puck impulse (m/s) this step."""
+        Returns the biggest puck impulse (m/s) this step.
+
+        With FAST on this runs compiled (physics_core.py, the same maths, without holding Python's
+        lock); step_ref is the Python reference it is tested against."""
+        if FAST:
+            return self._step_fast(dt, rigid_bot, rigid_top, anchor, shaft, substeps)
+        return self.step_ref(dt, rigid_bot, rigid_top, anchor, shaft, substeps)
+
+    def _step_fast(self, dt, rigid_bot, rigid_top, anchor, shaft, substeps) -> float:
+        import physics_core as pc
+        p, fl = self.puck, self.flex
+        has = rigid_bot is not None
+        if has:
+            rigid_bot = np.ascontiguousarray(rigid_bot, dtype=float)
+            rigid_top = np.ascontiguousarray(rigid_top, dtype=float)
+            anchor = rigid_bot.mean(axis=0) if anchor is None else np.asarray(anchor, dtype=float)
+            shaft = np.array([0.0, 1.0, 0.0]) if shaft is None else np.asarray(shaft, dtype=float)
+            n = len(rigid_bot)
+            if self._last is not None and len(self._last[0]) == n:
+                lb, lt, la = (np.array(a, dtype=float) for a in self._last)
+                has_last = 1
+            else:
+                lb, lt, la, has_last = np.empty((n, 3)), np.empty((n, 3)), np.empty(3), 0
+        else:
+            rigid_bot = rigid_top = lb = lt = _NO_EDGE
+            anchor = shaft = la = _NO_VEC
+            has_last = 0
+        ss = np.array([has_last, int(self.on_ice)], dtype=np.int64)
+        fx = np.zeros(3) if fl.x is None else np.array(fl.x, dtype=float)
+        fv = np.array(fl.v, dtype=float)
+        fs = np.array([0 if fl.x is None else 1], dtype=np.int64)
+        fk = np.array([fl.k, fl.c, fl.mass, Flex.MAX_BEND])
+        bend, slide = np.array(self.bend, dtype=float), np.array(self.slide, dtype=float)
+        pos, vel, normal = (np.array(a, dtype=float) for a in (p.pos, p.vel, p._normal))
+        zone = getattr(p, "zone", None)
+        pf = np.array([int(p.in_net), p.goals, int(getattr(p, "cleared", False)), getattr(p, "nets", 0)],
+                      dtype=np.int64)
+        pr = p.params
+        prm = np.array([pr.ice_mu, pr.blade_pop, pr.puck_mass, pr.blade_grip, pr.blade_thickness,
+                        pr.forgiveness, pr.soft_hands, pr.ice_bounce, pr.board_bounce, pr.net_bounce])
+        if zone is None:
+            rk = p.rink
+            rkv = np.array([rk.origin[0], rk.origin[2], rk.fwd[0], rk.fwd[2], rk.goal_dist, rk.half_width,
+                            rk.back, rk.end])
+            kind = 0
+        else:
+            rkv = np.array([zone.origin[0], zone.origin[2], zone.Z[0], zone.Z[2], 0.0, 0.0, 0.0, 0.0])
+            kind = 1
+        ev, nev = np.zeros((16, 2)), np.zeros(1, dtype=np.int64)
+        con, scr = np.zeros(7), np.zeros(2)
+        imp = pc.sim_step(dt, substeps, has, rigid_bot, rigid_top, anchor, shaft, lb, lt, la, ss,
+                          fx, fv, fs, fk, bend, slide, pos, vel, normal, pf, prm, kind, rkv, ev, nev, con, scr)
+        p.pos, p.vel, p._normal = pos, vel, normal
+        p.in_net, p.goals = bool(pf[0]), int(pf[1])
+        if zone is not None:
+            p.cleared, p.nets = bool(pf[2]), int(pf[3])
+        fl.x, fl.v = (fx if fs[0] else None), fv
+        self.on_ice = bool(ss[1])
+        if has:
+            self.bend, self.slide = bend, slide
+            self._last = (rigid_bot, rigid_top, anchor)
+        else:
+            self._last = None
+        for k in range(int(nev[0])):
+            name = pc.EVENT_NAMES[int(ev[k, 0])]
+            (self.events if name == "ice" else p.events).append((name, float(ev[k, 1])))
+        self.contact = con if con[6] > 0 else None       # the strongest blade-puck contact this step
+        self.scrape = scr                                # the blade on the ice: depth, speed
+        return float(imp)
+
+    def step_ref(self, dt: float, rigid_bot: np.ndarray | None, rigid_top: np.ndarray | None,
+                 anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4) -> float:
+        """The Python reference of step (see step)."""
         p = self.puck
         if rigid_bot is None:
             self._last = None

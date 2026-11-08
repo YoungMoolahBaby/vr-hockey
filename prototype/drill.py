@@ -59,6 +59,7 @@ import retrieval as rt
 import sandbox
 import stickspec
 import zone as zn
+from contacts import Contact
 
 HERE = Path(__file__).resolve().parent
 STATE_PATH = HERE / "drill_state.json"
@@ -173,10 +174,10 @@ class DrillPhysics(sandbox.Physics):
 
     def _game(self, t: float, imp: float) -> None:
         pl, pz = self.play, self.play.sim.puck
+        now = time.perf_counter()
         for kind, speed in pz.events:
-            if kind == "boards" and speed > 1:
-                pl.sounds.put(("thud", float(np.clip(speed / 12.0, 0, 1))))
-            elif kind in ("net", "cleared"):
+            pl.bus.publish(Contact(now, kind, speed))          # the boards thud plays from the bus
+            if kind in ("net", "cleared"):
                 self.log.event(t, kind, ms=round(speed, 2))
         pz.events.clear()
         self.mode.tick(t, self.blade, self.gripping)
@@ -478,6 +479,7 @@ def main() -> None:
     ap.add_argument("--free", type=float, help="the pressure (s) to begin with")
     ap.add_argument("--no-voice", action="store_true")
     ap.add_argument("--no-sound", action="store_true")
+    ap.add_argument("--audio-device", default="Oculus", help="part of the output device's name (default: the Quest over Link)")
     ap.add_argument("--notes", default="")
     args = ap.parse_args()
 

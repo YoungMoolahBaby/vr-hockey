@@ -119,6 +119,14 @@ The hands-to-stick mapping stays strictly 1:1: no weight offsets or magnets.
 **Build order:** a contact-event bus, physics off the GIL, a mixing audio stream, PCM haptics,
 then a tuned contact vocabulary, blade-face calibration and an honest reception.
 
+**Steps 1-3 built** (2026-11-07):
+- **Contact bus:** `contacts.py`.
+- **Compiled physics:** `physics_core.py`, numba with nogil, 3.8x cheaper per tick, identical on
+  real play.
+- **Mixer:** `audio.py`, a 23 ms constant delay to the headset, every contact its own sound.
+
+Next: step 4, PCM haptics.
+
 ## Ice assist
 
 With no floor under the blade, the game helps keep it on the ice. The ice works like a floor,

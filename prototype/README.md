@@ -128,7 +128,11 @@ Your stick, a puck and a net, laid out in front of you. Play, and tune everythin
 
 **What you hear and feel:**
 - **Sounds:** a tap when the blade lands, a dull "thock" off the puck, a ping off the posts, a
-  thud off the boards.
+  thud off the boards. Every contact gets its own sound, from the contact bus (`contacts.py`),
+  mixed (`audio.py`) straight to the headset's Link audio.
+  - About 23 ms after the contact, the same every time.
+  - Up to 16 at once, 5 variants of each, and louder for harder hits.
+  - `--audio-device` picks another output; with no device it falls back to winsound.
 - **Buzz:** every puck contact buzzes the hands holding the stick, harder hits for longer.
 
 The voice calls each shot's speed in mph.
@@ -256,6 +260,11 @@ Next: tuning, after the feel research (`../reports/`).
 - Session 2: 752/s, after a too-short GIL switch interval (reverted).
 - Power-play session: about 920/s.
 - Off the headset, a contention harness measures 999/s.
+- **Since the compiled physics** (`physics_core.py`, numba with nogil):
+  - A tick costs 144 us instead of 549.
+  - 60 s of real play gives the same 222 touches and identical puck paths.
+  - The harness, with drawing, rep building and the headset audio stream all running, holds
+    1000/s with 0 audio underruns.
 
 ## Files
 
@@ -270,7 +279,10 @@ Next: tuning, after the feel research (`../reports/`).
 | `synth.py` | synthetic recordings with known truth (noise, drift, dropouts, 500 Hz updates, top hand off) |
 | `xrcheck.py` | runtime and headset check |
 | `sandbox.py` | free play: the stick, a puck and a net, with settings tuned in the headset; its physics tick, drawing and frame loop are reused by the drills |
-| `puck.py` | the puck, the blade contact, the shaft flex, the ice |
+| `puck.py` | the puck, the blade contact, the shaft flex, the ice (the Python reference; `FAST` runs it compiled) |
+| `physics_core.py` | the same physics compiled with numba (nogil): what the app runs; tested against `puck.py` to 1e-9 |
+| `contacts.py` | the contact bus: every contact from the 1 kHz physics, which the sound and the buzz play from |
+| `audio.py` | the mixer: a low-latency stream to the headset, each contact placed at its own sample |
 | `sounds.py` | the synthesized sounds (tap, thock, ping, thud, go, whistle) |
 | `stickmath.py` | rotations and quaternions |
 | `replay.py`, `touches.py` | replay a recorded session's hands through the physics; measure every blade-puck touch (does the puck leave faster than the blade?) |
