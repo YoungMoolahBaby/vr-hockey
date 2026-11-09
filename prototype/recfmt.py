@@ -57,7 +57,7 @@ class Track:
         self.t = df["t"].to_numpy(dtype=np.float64)
         self.flags = df[f"{dev}_flags"].to_numpy(dtype=np.int64)
         self.p = df[[f"{dev}_px", f"{dev}_py", f"{dev}_pz"]].to_numpy(dtype=np.float64)
-        q = df[[f"{dev}_qx", f"{dev}_qy", f"{dev}_qz", f"{dev}_qw"]].to_numpy(dtype=np.float64)
+        q = df[[f"{dev}_qx", f"{dev}_qy", f"{dev}_qz", f"{dev}_qw"]].to_numpy(dtype=np.float64, copy=True)  # written below
         # an all-zero quaternion means "no pose"; make it identity so the maths stays finite
         bad = np.linalg.norm(q, axis=1) < 1e-6
         q[bad] = [0, 0, 0, 1]

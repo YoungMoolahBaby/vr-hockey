@@ -232,7 +232,7 @@ class _HeldTrack(Track):
 
 
 def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ice_mu: float,
-                  want: str | None = None, pass_speed: float = PASS_SPEED, shot_speed: float = SHOT_SPEED,
+                  air_k: float = 0.0, want: str | None = None, pass_speed: float = PASS_SPEED, shot_speed: float = SHOT_SPEED,
                   decide_s: float = rt.DECIDE_S, tries: int = 300, pause_s: float = 0.0,
                   ratio: float = 1.6, min_gap: float = 0.01) -> Scenario:
     """A rep where `want` (or any out) is clearly the best: worth at least `ratio` times the next
@@ -252,8 +252,9 @@ def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ic
                for k, v in BEHAVIOURS.items()}
         v_in = r.uniform(6.5, 8.0)
         d_in = float(np.linalg.norm(blade - mates["W"]))
-        a = ice_mu * pk.G
-        t_arr = (v_in - math.sqrt(max(v_in * v_in - 2 * a * d_in, 0.01))) / max(a, 1e-6) if a > 0 else d_in / v_in
+        t_arr = pk.slide_time(v_in, d_in, ice_mu, air_k)          # the pass in: ice and air
+        if not math.isfinite(t_arr):
+            continue
         t_commit = r.uniform(0.3, 0.7)
         tracks = _pk_tracks(r, beh, starts, mates, head, t_commit, t_arr, free_time)
         t_dec = t_arr + float(np.clip(decide_s, 0.3, max(0.3, 0.8 * free_time)))
@@ -272,7 +273,7 @@ def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ic
             fallback = (top / max(second, 1e-4), sc)
     if fallback is not None:
         return fallback[1]
-    return make_scenario(rng, free_time=free_time, blade=blade, head=head, ice_mu=ice_mu, want=None,
+    return make_scenario(rng, free_time=free_time, blade=blade, head=head, ice_mu=ice_mu, air_k=air_k, want=None,
                          pass_speed=pass_speed, shot_speed=shot_speed, decide_s=decide_s, tries=tries,
                          pause_s=pause_s, ratio=1.2, min_gap=0.005)
 

@@ -173,11 +173,12 @@ _KEEP: dict[float, float] = {}
 
 
 def corner_keep(board_bounce: float) -> float:
-    """The share of its speed a puck keeps rimming around a corner (board friction; no ice friction)."""
+    """The share of its speed a puck keeps rimming around a corner (board friction; no ice friction
+    or air: rim_launch adds those along the way)."""
     key = round(board_bounce, 3)
     if key not in _KEEP:
         zone = zn.Zone(np.zeros(3), np.array([0.0, 0.0, 1.0]))
-        p = zn.ZonePuck(pk.Params(ice_mu=0.0, board_bounce=board_bounce), zone)
+        p = zn.ZonePuck(pk.Params(ice_mu=0.0, board_bounce=board_bounce, air_k=0.0), zone)
         p.place(-(zn.WIDTH / 2) + pk.R, zn.CORNER_R + 0.5, 0.0, -10.0)
         for _ in range(3000):
             p.step(0.001)
@@ -188,21 +189,21 @@ def corner_keep(board_bounce: float) -> float:
     return _KEEP[key]
 
 
-def rim_launch(z_launch: float, x_target: float, v_arrive: float, ice_mu: float, keep: float) -> tuple[float, float]:
+def rim_launch(z_launch: float, x_target: float, v_arrive: float, ice_mu: float, keep: float,
+               air_k: float = 0.0) -> tuple[float, float]:
     """A puck sent down the right wall from z_launch rims around the right corner and along the end
-    boards: the launch speed that has it pass x_target at v_arrive, and when it gets there (s)."""
-    a = ice_mu * pk.G
+    boards: the launch speed that has it pass x_target at v_arrive, and when it gets there (s).
+    Ice friction and air drag along all three legs; the boards' share (keep) in the corner."""
     L1 = max(z_launch - zn.CORNER_R, 0.0)
     L2 = math.pi / 2 * (zn.CORNER_R - pk.R)
     L3 = max(x_target + (zn.WIDTH / 2 - zn.CORNER_R), 0.0)
     v3 = v_arrive
-    v2 = math.sqrt(v3 * v3 + 2 * a * L3)
-    v1 = math.sqrt(v2 * v2 + 2 * a * L2) / keep
-    v0 = math.sqrt(v1 * v1 + 2 * a * L1)
-
-    def leg(vi, vo, L):
-        return L / max((vi + vo) / 2, 1e-6)
-    return v0, leg(v0, v1, L1) + leg(v1, v2, L2) + leg(v2, v3, L3)
+    v2 = pk.launch_speed(v3, L3, ice_mu, air_k)
+    v1 = pk.launch_speed(v2, L2, ice_mu, air_k) / keep
+    v0 = pk.launch_speed(v1, L1, ice_mu, air_k)
+    t = (pk.slide_time(v0, L1, ice_mu, air_k) + pk.slide_time(v1 * keep, L2, ice_mu, air_k)
+         + pk.slide_time(v2, L3, ice_mu, air_k))
+    return v0, t
 
 
 # ----------------------------------------------------------------------------- skaters
@@ -389,7 +390,7 @@ def _f2_track(rng, post: str, mates: dict, t_commit: float) -> Track:
 
 
 def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ice_mu: float,
-                  board_bounce: float, want: str | None = None, min_gap: float = 0.25,
+                  board_bounce: float, air_k: float = 0.0, want: str | None = None, min_gap: float = 0.25,
                   pass_speed: float = PASS_SPEED, decide_s: float = DECIDE_S, tries: int = 400,
                   pause_s: float = 0.0) -> Scenario:
     """A rep where `want` (or any out) is clearly the best, by at least min_gap in value, for a
@@ -407,7 +408,7 @@ def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ic
         r = np.random.default_rng(seed)
         mates = {k: np.array(c) + r.uniform(-1, 1, 2) * np.array(j) for k, (c, j) in TEAMMATES.items()}
         v_arrive, z_launch = r.uniform(3.5, 5.0), r.uniform(9.0, 14.0)
-        v0, t_arr = rim_launch(z_launch, blade[0], v_arrive, ice_mu, keep)
+        v0, t_arr = rim_launch(z_launch, blade[0], v_arrive, ice_mu, keep, air_k)
         route, post = r.choice(list(F1_WAYPOINTS)), r.choice(list(F2_POSTS))
         f1, t_c = _f1_track(r, route, head, t_arr, free_time)
         f2 = _f2_track(r, post, mates, t_c)
@@ -426,7 +427,7 @@ def make_scenario(rng: np.random.Generator, *, free_time: float, blade, head, ic
     if fallback is not None:
         return fallback[1]
     return make_scenario(rng, free_time=free_time + 0.3, blade=blade, head=head, ice_mu=ice_mu,
-                         board_bounce=board_bounce, want=None, min_gap=min_gap / 2, pass_speed=pass_speed,
+                         board_bounce=board_bounce, air_k=air_k, want=None, min_gap=min_gap / 2, pass_speed=pass_speed,
                          decide_s=decide_s, tries=tries, pause_s=pause_s)
 
 

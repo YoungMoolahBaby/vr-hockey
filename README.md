@@ -33,6 +33,8 @@ Quick start (in `prototype/`, with the headset on Link):
 uv run python sandbox.py               # free play
 uv run python drill.py                 # retrieval drill
 uv run python drill.py --drill pp      # power-play drill
+uv run python game.py                  # 3 on 3 with two goalies, first to 5
+uv run python game.py --free           # free skate on the same rink: just you and a puck
 ```
 
 **You hold two controllers, never a physical stick.** The stick is virtual:
@@ -66,7 +68,8 @@ The bet is that the hard part is not the physics engine but four VR problems at 
 **The Python physics** (`puck.py`):
 - 1 kHz, with 4 substeps per controller sample.
 - Swept 3D blade contact: an open face lifts the puck.
-- A heavy, dead, frozen-rubber puck (restitution 0.2, soft hands below 3 m/s).
+- A heavy, dead, frozen-rubber puck (restitution 0.2).
+- An ice assist: a blade hovering within 16 cm of the ice rests on it, since you can't feel the ice.
 - A light, flexible composite shaft: a mass-spring blade whose stiffness comes from the flex rating.
 - Grip forgiveness.
 - Ice, board and post sounds, and buzzes scaled by impulse.
@@ -136,6 +139,24 @@ then a tuned contact vocabulary, blade-face calibration and an honest reception.
 - **Mixer:** `audio.py`, a 23 ms constant delay to the headset, every contact its own sound.
 
 Next: step 4, PCM haptics.
+
+### Hockey physics feel (2026-11-09)
+
+A second round, run as research rounds (4 researchers, each checked by a fact-checker, then a
+synthesis): what would make the puck, the skating and the turning feel like hockey. Report:
+[reports/Hockey physics feel.md](reports/Hockey%20physics%20feel.md); notes in
+`research_notes/Hockey physics feel/`.
+- **The puck, now built:**
+  - ice friction 0.085, as Jon had it;
+  - air drag (it equals the ice's friction at about 14 m/s);
+  - boards, glass and posts at 0.30 (a frozen puck), down from 0.55;
+  - a "hands" setting (the stick's damping) in place of "blade pop", which did almost nothing;
+  - no low-speed bounce fade;
+  - the AI's and the drills' puck predictions include the drag.
+- **The skating, built as settings, off by default, to try one at a time:** a bounded push, a
+  glide, a hockey stop, a turn limit at speed, and slower backward and sideways skating. A 0-10
+  comfort check and a per-frame log of the thumbsticks' motion come with them. The old easing
+  starts and ends every move at about 2 g, and that may be what made the 3v3 sickening.
 
 ## Ice assist
 

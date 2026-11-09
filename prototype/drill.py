@@ -28,7 +28,8 @@ Controls
   B                             say the last result again
   X                             skip to a new rep
   Y                             fit the stick (as in the sandbox)
-  left thumbstick               tune the settings (as in the sandbox; saved only there)
+  left / right thumbstick       move / turn you (as in the sandbox)
+  click the left thumbstick     switch it to tuning the settings (as in the sandbox; saved only there)
   hold the left thumbstick in   (1 s) lay the zone out around you again
 
 Recorded to data/drill-<timestamp>/ like the sandbox, plus every rep in events.jsonl ("rep") and
@@ -88,7 +89,7 @@ class Retrieval:
     @staticmethod
     def scenario(rng, level, head, params, you, want):
         return rt.make_scenario(rng, free_time=level, blade=rt.JON_BLADE, head=head, ice_mu=params.ice_mu,
-                                board_bounce=params.board_bounce, want=want, pass_speed=you.pass_speed,
+                                board_bounce=params.board_bounce, air_k=params.air_k, want=want, pass_speed=you.pass_speed,
                                 decide_s=you.decide_s, pause_s=0.002)
 
     @staticmethod
@@ -124,7 +125,7 @@ class PowerPlay:
     @staticmethod
     def scenario(rng, level, head, params, you, want):
         return pp.make_scenario(rng, free_time=level, blade=pp.JON_BLADE, head=head, ice_mu=params.ice_mu,
-                                want=want, pass_speed=you.pass_speed, shot_speed=you.shot_speed,
+                                air_k=params.air_k, want=want, pass_speed=you.pass_speed, shot_speed=you.shot_speed,
                                 decide_s=you.decide_s, pause_s=0.002)
 
     @staticmethod

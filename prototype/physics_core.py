@@ -28,14 +28,14 @@ ICE_BEND = pk.ICE_BEND
 Z_WIDTH, Z_CORNER_R, Z_GOAL_Z, Z_BLUE_Z = zn.WIDTH, zn.CORNER_R, zn.GOAL_Z, zn.BLUE_Z
 Z_NET_HALF_W, Z_NET_DEPTH, Z_NET_H, Z_POST_R, BOARD_MU = zn.NET_HALF_W, zn.NET_DEPTH, zn.NET_H, zn.POST_R, zn.BOARD_MU
 
-EV_ICE, EV_GOAL, EV_POST, EV_BOARDS, EV_NET, EV_CLEARED = 1, 2, 3, 4, 5, 6
+EV_ICE, EV_GOAL, EV_POST, EV_BOARDS, EV_NET, EV_CLEARED, EV_NET2 = 1, 2, 3, 4, 5, 6, 7
 EVENT_NAMES = {EV_ICE: "ice", EV_GOAL: "goal", EV_POST: "post", EV_BOARDS: "boards", EV_NET: "net",
-               EV_CLEARED: "cleared"}
+               EV_CLEARED: "cleared", EV_NET2: "net2"}
 # prm: ice_mu, blade_pop, puck_mass, blade_grip, blade_thickness, forgiveness, soft_hands, ice_bounce,
-#      board_bounce, net_bounce
+#      board_bounce, net_bounce, magnet, release, air_k
 # pf (puck flags): in_net, goals, cleared, nets
-# rk: origin x, origin z, direction x, direction z (sandbox: fwd; zone: +z up ice), goal_dist, half_width,
-#     back, end
+# rk: origin x, origin z, direction x, direction z (sandbox: fwd; zone, arena: +z up ice), then
+#     sandbox: goal_dist, half_width, back, end; arena: length
 # con (the strongest blade contact this step): impulse, approach speed, slide speed, heel(0)-toe(1),
 #     x, z, contacts this step
 # scr (the blade on the ice): press depth (m, deepest this step), blade speed along the ice (m/s)
@@ -70,10 +70,11 @@ def integrate(h, pos, vel, pf, prm):
     p0, p1, p2 = pos[0], pos[1], pos[2]
     v0, v1, v2 = vel[0], vel[1], vel[2]
     on_ice = p1 <= H / 2 + 1e-4 and v1 <= 1e-6
+    k = prm[12]
     if on_ice:
         p1, v1 = H / 2, 0.0
         s = math.sqrt(v0 * v0 + v2 * v2)
-        dec = prm[0] * G * h
+        dec = (prm[0] * G + k * s * s) * h        # the ice (Coulomb), and the air
         if s <= dec:
             v0 = 0.0
             v2 = 0.0
@@ -83,6 +84,11 @@ def integrate(h, pos, vel, pf, prm):
             v2 *= f
     else:
         v1 -= G * h
+        if k > 0:                                  # the air, on a puck in flight
+            f = 1 - min(k * math.sqrt(v0 * v0 + v1 * v1 + v2 * v2) * h, 1.0)
+            v0 *= f
+            v1 *= f
+            v2 *= f
     if pf[0]:
         v0 *= 0.97
         v1 *= 0.97
@@ -294,24 +300,20 @@ def _sign(x):
 
 
 @njit(cache=True)
-def rink_zone(h, pos, vel, pf, prm, rk, ev, nev):
-    """zone.ZonePuck._rink and _net: rounded boards, our net, open past the blue line."""
-    Zx, Zz = rk[2], rk[3]
-    Xx, Xz = Zz, -Zx                                     # X = UP x Z
-    dx, dz = pos[0] - rk[0], pos[2] - rk[1]
-    x, y, z = dx * Xx + dz * Xz, pos[1], dx * Zx + dz * Zz
-    vx, vz = vel[0] * Xx + vel[2] * Xz, vel[0] * Zx + vel[2] * Zz
+def _zone_end(h, x, y, z, vx, vz, inside, prm, ev, nev):
+    """One end in its zone frame: the rounded boards, then the net (zone.ZonePuck._rink and _net).
+    inside: the puck is already in this net. Returns x, z, vx, vz, and whether it just went in."""
     hit, pen, nx, nz = _boards_contact(x, z, R)
     if hit:
         x, z = x + nx * pen, z + nz * pen
         if -(vx * nx + vz * nz) > 0.5:
             _event(ev, nev, EV_BOARDS, math.sqrt(vx * vx + vz * vz))
         vx, vz = _bounce(vx, vz, nx, nz, prm[8], BOARD_MU)
-    # the net
     r = R
     front, back, hw = Z_GOAL_Z, Z_GOAL_Z - Z_NET_DEPTH, Z_NET_HALF_W
     nb, bb = prm[9], prm[8]
-    if pf[0]:
+    entered = False
+    if inside:
         if abs(x) > hw - r:
             if x * vx > 0:
                 vx = -nb * vx
@@ -324,9 +326,7 @@ def rink_zone(h, pos, vel, pf, prm, rk, ev, nev):
         px, pz = x - vx * h, z - vz * h
         if pz >= front + r - 1e-6:
             if abs(x) < hw - r:
-                pf[0] = 1
-                pf[3] += 1
-                _event(ev, nev, EV_NET, math.sqrt(vx * vx + vz * vz))
+                entered = True
             else:
                 z = front + r
                 if vz < 0:
@@ -339,6 +339,22 @@ def rink_zone(h, pos, vel, pf, prm, rk, ev, nev):
             z = back - r
             if vz > 0:
                 vz = -nb * vz
+    return x, z, vx, vz, entered
+
+
+@njit(cache=True)
+def rink_zone(h, pos, vel, pf, prm, rk, ev, nev):
+    """zone.ZonePuck._rink and _net: rounded boards, our net, open past the blue line."""
+    Zx, Zz = rk[2], rk[3]
+    Xx, Xz = Zz, -Zx                                     # X = UP x Z
+    dx, dz = pos[0] - rk[0], pos[2] - rk[1]
+    x, y, z = dx * Xx + dz * Xz, pos[1], dx * Zx + dz * Zz
+    vx, vz = vel[0] * Xx + vel[2] * Xz, vel[0] * Zx + vel[2] * Zz
+    x, z, vx, vz, entered = _zone_end(h, x, y, z, vx, vz, pf[0] != 0, prm, ev, nev)
+    if entered:
+        pf[0] = 1
+        pf[3] += 1
+        _event(ev, nev, EV_NET, math.sqrt(vx * vx + vz * vz))
     pos[0] = rk[0] + x * Xx + z * Zx
     pos[1] = y
     pos[2] = rk[1] + x * Xz + z * Zz
@@ -352,11 +368,41 @@ def rink_zone(h, pos, vel, pf, prm, rk, ev, nev):
 
 
 @njit(cache=True)
+def rink_arena(h, pos, vel, pf, prm, rk, ev, nev):
+    """arena.ArenaPuck._rink: the whole rink, each half its end's zone (the far one turned round).
+    rk[4]: the length. pf[0]: 0, 1 (in the home net) or 2 (in the far net)."""
+    Zx, Zz, L = rk[2], rk[3], rk[4]
+    Xx, Xz = Zz, -Zx
+    dx, dz = pos[0] - rk[0], pos[2] - rk[1]
+    x, y, z = dx * Xx + dz * Xz, pos[1], dx * Zx + dz * Zz
+    vx, vz = vel[0] * Xx + vel[2] * Xz, vel[0] * Zx + vel[2] * Zz
+    far = z > L / 2
+    if far:
+        x, z, vx, vz = -x, L - z, -vx, -vz
+    x, z, vx, vz, entered = _zone_end(h, x, y, z, vx, vz, pf[0] != 0, prm, ev, nev)
+    if entered:
+        pf[0] = 2 if far else 1
+        pf[3] += 1
+        _event(ev, nev, EV_NET2 if far else EV_NET, math.sqrt(vx * vx + vz * vz))
+    if far:
+        x, z, vx, vz = -x, L - z, -vx, -vz
+    pos[0] = rk[0] + x * Xx + z * Zx
+    pos[1] = y
+    pos[2] = rk[1] + x * Xz + z * Zz
+    vy = vel[1]
+    vel[0] = vx * Xx + vz * Zx
+    vel[1] = vy
+    vel[2] = vx * Xz + vz * Zz
+
+
+@njit(cache=True)
 def _rink(kind, h, pos, vel, pf, prm, rk, ev, nev):
     if kind == 0:
         rink_sandbox(h, pos, vel, pf, prm, rk, ev, nev)
-    else:
+    elif kind == 1:
         rink_zone(h, pos, vel, pf, prm, rk, ev, nev)
+    else:
+        rink_arena(h, pos, vel, pf, prm, rk, ev, nev)
 
 
 @njit(cache=True)
@@ -422,11 +468,72 @@ def ice_rest(bend, low, shaft, max_bend, out_bend, out_slide):
             out_slide[k] = shaft[k] * (need / sy)
 
 
+# Soft hands (Params.magnet; off in the sandbox and drills, on in the 3v3). The feel research says
+# no possession magnet, at most "a little damping inside the blade's cup, within the same physics
+# step". This is that, and it only ever absorbs: a puck on the blade may not run ahead of the blade
+# that pushes it (it slows as the blade slows, instead of flying off), and a retreating blade leaves
+# it where it is (no pull: it isn't stuck to the stick). Along the blade, a pressed puck rolls off
+# the toe or heel a little less easily. All relative to your body (skating and turning don't
+# count), and only at handling speeds: a blade or a puck moving faster than Params.release is a
+# shot or a pass, and the puck comes off as hit.
+CRADLE_GAP = 0.04        # m: the puck this close to touching the blade's bottom edge is in its cup
+CRADLE_TAU = 0.005       # s: at full strength a puck leaving the face is caught within a few ms (inside the cup)
+CRADLE_TAU_T = 0.04      # s: along the blade, much gentler
+
+
+@njit(cache=True)
+def cradle(h, pos, vel, bot, vb, strength, release, thickness, body):
+    """Absorb a puck leaving the blade's face faster than the blade follows it, at handling speeds
+    (see above). body: your body's motion (vx, vz, turn rate, pivot x, pivot z). The Python
+    reference (puck.Sim.step_ref) runs this same function uncompiled (cradle.py_func)."""
+    if strength <= 0.0 or pos[1] > H / 2 + 0.02:
+        return
+    n = bot.shape[0]
+    px, pz = pos[0], pos[2]
+    best_d, best_i, best_t, qx, qz = 1e30, 0, 0.0, 0.0, 0.0
+    for i in range(n - 1):
+        ax, az = bot[i, 0], bot[i, 2]
+        abx, abz = bot[i + 1, 0] - ax, bot[i + 1, 2] - az
+        t = ((px - ax) * abx + (pz - az) * abz) / max(abx * abx + abz * abz, 1e-12)
+        t = min(max(t, 0.0), 1.0)
+        x, z = ax + t * abx, az + t * abz
+        d = math.sqrt((px - x) ** 2 + (pz - z) ** 2)
+        if d < best_d:
+            best_d, best_i, best_t, qx, qz = d, i, t, x, z
+    contact = R + thickness / 2
+    if best_d > contact + CRADLE_GAP or best_d < 1e-9:
+        return
+    i, t = best_i, best_t
+    bx = body[0] + body[2] * (qz - body[4])               # your body's motion where the blade is
+    bz = body[1] - body[2] * (qx - body[3])
+    ubx = vb[i, 0] + t * (vb[i + 1, 0] - vb[i, 0]) - bx   # the blade, relative to you
+    ubz = vb[i, 2] + t * (vb[i + 1, 2] - vb[i, 2]) - bz
+    if math.sqrt(ubx * ubx + ubz * ubz) > release:
+        return                                            # shooting: let it go as hit
+    upx, upz = vel[0] - bx, vel[2] - bz                   # the puck, relative to you
+    if math.sqrt(upx * upx + upz * upz) > release:
+        return                                            # it was shot or passed (or a pass is arriving)
+    nx, nz = (px - qx) / best_d, (pz - qz) / best_d       # from the blade to the puck
+    vbn = ubx * nx + ubz * nz
+    vpn = upx * nx + upz * nz
+    cap = max(vbn, 0.0)                                   # it may leave the face no faster than the blade follows
+    if vpn > cap:
+        dv = strength * (1.0 - math.exp(-h / CRADLE_TAU)) * (vpn - cap)
+        vel[0] -= dv * nx
+        vel[2] -= dv * nz
+    if vbn >= 0.0:                                        # pressed on the face: less rolling off the end
+        tx, tz = -nz, nx
+        rt = (upx - ubx) * tx + (upz - ubz) * tz
+        kt = strength * (1.0 - math.exp(-h / CRADLE_TAU_T))
+        vel[0] -= kt * rt * tx
+        vel[2] -= kt * rt * tz
+
+
 @njit(cache=True, nogil=True)
 def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
              last_bot, last_top, last_anchor, ss,
              fx, fv, fs, fk, bend_out, slide,
-             pos, vel, normal, pf, prm, kind, rk, ev, nev, con, scr):
+             pos, vel, normal, pf, prm, kind, rk, ev, nev, con, scr, body):
     """puck.Sim.step on arrays. ss: has_last, on_ice. Returns the biggest impulse (m/s)."""
     nev[0] = 0
     for k in range(7):
@@ -523,6 +630,7 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
                         con[k] = cinfo[k]
                 for k in range(3):
                     fv[k] += out_dv[k]
+            cradle(h, pos, vel, bot, vbc, prm[10], prm[11], prm[4], body)
         _rink(kind, h, pos, vel, pf, prm, rk, ev, nev)
     for k in range(3):
         bend_out[k] = total_bend[k]
@@ -539,17 +647,20 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
 
 
 def warm() -> float:
-    """Compile (first run) or load the cached kernel before the 1 kHz loop needs it. Seconds taken."""
+    """Compile (first run) or load the cached kernel before the 1 kHz loop needs it, for every rink
+    and soft hands on. Seconds taken. (Its arguments must match sim_step's: tests/test_physics_core.py
+    runs it.)"""
     import time
     t = time.perf_counter()
     edge = np.zeros((8, 3))
-    for kind in (0, 1):
+    for kind in (0, 1, 2):
         for has in (True, False):
             sim_step(0.001, 4, has, edge, edge + 0.07, np.zeros(3), np.array([0.0, 1.0, 0.0]),
                      np.zeros((8, 3)), np.zeros((8, 3)), np.zeros(3), np.zeros(2, dtype=np.int64),
                      np.zeros(3), np.zeros(3), np.zeros(1, dtype=np.int64), np.array([1000.0, 10.0, 0.15, 0.15]),
                      np.zeros(3), np.zeros(3), np.array([0.0, H / 2, 0.5]), np.zeros(3), np.array([1.0, 0, 0]),
-                     np.zeros(4, dtype=np.int64), np.array([0.05, 0.2, 0.17, 0.35, 0.012, 0.01, 3.0, 0.25, 0.55, 0.08]),
-                     kind, np.array([0.0, 0.0, 0.0, -1.0, 6.0, 6.0, 3.0, 1.5]), np.zeros((16, 2)),
-                     np.zeros(1, dtype=np.int64), np.zeros(7), np.zeros(2))
+                     np.zeros(4, dtype=np.int64),
+                     np.array([0.085, 0.3, 0.17, 0.35, 0.012, 0.01, 0.0, 0.2, 0.3, 0.08, 0.7, 4.5, 0.0043]),
+                     kind, np.array([0.0, 0.0, 0.0, -1.0, 46.0 if kind == 2 else 6.0, 6.0, 3.0, 1.5]),
+                     np.zeros((16, 2)), np.zeros(1, dtype=np.int64), np.zeros(7), np.zeros(2), np.zeros(5))
     return time.perf_counter() - t

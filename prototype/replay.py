@@ -39,10 +39,12 @@ def replay(run_dir, flex=None, pop=None, grip=None, verbose=True) -> list[dict]:
     df, meta = recfmt.load(run_dir)
     spec, fit = StickSpec.from_dict(meta["spec"]), grab.Fit.from_dict(meta["fit"])
     values = sandbox.Tuning.defaults(spec, fit, pk.Params())
-    for k, v in (("flex", flex), ("pop", pop), ("grip", grip)):
+    for k, v in (("flex", flex), ("grip", grip)):
         if v is not None:
             values[k] = v
     play = sandbox.Play(sandbox.Tuning(spec, values))
+    if pop is not None:                                  # no longer a setting (it barely matters): the param
+        play.params.blade_pop = pop
     physics = sandbox.Physics(play, _Quiet(), _Quiet())
     S = analyze.analyze(run_dir, make_plots=False)
     peaks = [s["t"] for ph in S["shots"].values() for s in ph["shots"]]

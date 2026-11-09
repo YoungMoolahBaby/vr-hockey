@@ -5,8 +5,13 @@
 
 Controls
   grip buttons (middle finger)  hold the stick: right = top hand, left = bottom hand (grab.py)
-  left thumbstick left/right    pick a setting (the voice says which, and its value)
-  left thumbstick up/down       change it (hold to keep changing)
+  left thumbstick               move you around the ice; forward is where you look (rig.py)
+  right thumbstick left/right   turn you, about your head: smoothly, or in steps per flick (the
+                                "snap turn" setting, degrees; 0 = smooth). The view's edges darken
+                                while you move ("comfort vignette")
+  click the left thumbstick     (a quick press) switch it to tuning, and back:
+    left/right                  pick a setting (the voice says which, and its value)
+    up/down                     change it (hold to keep changing)
   X                             a new puck, on your blade
   Y                             fit the stick in your hand: right thumbstick turns the blade
                                 (left/right) and tilts the stick (up/down); hold B and push to
@@ -16,7 +21,9 @@ Controls
   A                             save the settings (sandbox_settings.json, used next time)
 
 Settings: stick length, lie, curve depth, face open, flex, forgiveness (extra reach for catching
-the puck), puck weight, ice friction, blade pop, blade grip, buzz strength.
+the puck), puck weight, ice friction, blade pop, blade grip, buzz strength, soft hands (off here; the 3v3 turns it on) and its shot
+release speed, skate speed, snap turn (degrees; 0 = smooth), smooth turn speed, comfort vignette,
+ice assist (a blade within this many cm of the ice rests on it: you can't feel the ice; 0 = off).
 
 The puck physics (puck.py) runs at 1 kHz, four substeps per controller sample, with the blade
 flexing on the shaft. The ice holds the blade up: push lower and the shaft bends (and loads)
@@ -33,8 +40,10 @@ import _thread
 import argparse
 import collections
 import ctypes
+import ctypes.wintypes
 import datetime as dt
 import json
+import math
 import queue
 import threading
 import time
@@ -51,6 +60,7 @@ import grab
 import puck as pk
 import recfmt
 import record
+import rig
 import stickmath
 import stickspec
 import audio
@@ -59,6 +69,17 @@ from stickspec import INCH
 
 HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = HERE / "sandbox_settings.json"
+SNAP_DEG = 0.0           # smooth turning (Jon's pick); 30 turns you in steps, the comfort option
+VIGNETTE = 0.7           # comfort: the view's edges darken while the thumbsticks move you (0 = off)
+COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
+JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
+# The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
+# the stick the headset draws (~45 ms ahead over Link). OFF: the runtime's poses that far ahead are
+# steppy (free skate 2026-11-09: per-sample hand speed spiked to 3.4x its 20 ms average at p99, against
+# 1.4x sampled at now; 15% of samples repeated the last pose, against 6%), and the spikes went into the
+# blade: shots of 75-100 mph where they had been 40-46.
+PREDICT = False
+AHEAD_MAX_NS = 100e6     # ... trusting the runtime's prediction this far ahead at most
 MPH = 2.23694
 AWAY_LIMIT_S = 300
 
@@ -74,6 +95,7 @@ class Setting:
     lo: float
     hi: float
     fmt: str
+    zero: str = ""           # what 0 is called, when 0 turns it off ("off")
 
 
 SETTINGS = (
@@ -84,11 +106,39 @@ SETTINGS = (
     Setting("flex", "flex", 5, 30, 120, "{:.0f}"),
     Setting("forgive_cm", "forgiveness", 0.5, 0.0, 4.0, "{:g} centimetres"),
     Setting("puck_g", "puck weight", 10, 100, 400, "{:.0f} grams"),
-    Setting("ice_mu", "ice friction", 0.005, 0.0, 0.1, "{:.3f}"),
-    Setting("pop", "blade pop", 0.05, 0.0, 0.9, "{:.2f}"),
+    Setting("ice_mu", "ice friction", 0.005, 0.0, 0.15, "{:.3f}"),
+    Setting("air", "air drag", 0.5, 0.0, 10.0, "{:g} per kilometre", "off"),            # Params.air_k x 1000
+    Setting("boards", "board bounce", 0.05, 0.0, 0.9, "{:.2f}"),
+    Setting("hands", "hands", 0.05, 0.1, 1.0, "{:.2f}"),        # the stick's damping: higher gives a softer catch
     Setting("grip", "blade grip", 0.05, 0.0, 1.0, "{:.2f}"),
     Setting("buzz", "buzz", 0.1, 0.0, 1.0, "{:.1f}"),
+    Setting("magnet", "soft hands", 0.1, 0.0, 1.0, "{:.1f}", "off"),
+    Setting("release", "shot release", 0.5, 2.0, 9.0, "{:g} metres per second"),
+    Setting("skate", "skate speed", 0.5, 1.0, 9.0, "{:g} metres per second"),
+    # the skating model (rig.Drive): each off at 0, as it always was
+    Setting("push", "push", 1, 0, 10, "{:g} metres per second squared", "off"),
+    Setting("glide", "glide", 0.25, 0, 4, "slows {:g} metres per second squared", "off"),
+    Setting("stop", "hockey stop", 1, 0, 12, "{:g} metres per second squared", "off"),
+    Setting("carve", "turn limit", 1, 0, 12, "{:g} metres per second squared", "off"),
+    Setting("back", "backward speed", 0.1, 0.3, 1.0, "{:.0%} of forward"),
+    Setting("side", "sideways speed", 0.1, 0.3, 1.0, "{:.0%} of forward"),
+    Setting("snap", "snap turn", 15, 0, 90, "{:.0f} degrees"),
+    Setting("turn", "smooth turn speed", 15, 45, 360, "{:.0f} degrees per second"),
+    Setting("vignette", "comfort vignette", 0.1, 0.0, 1.0, "{:.1f}"),
+    Setting("check", "comfort check", 1, 0, 15, "every {:g} minutes", "off"),   # a 0-10 queasiness check
+    Setting("ice", "ice assist", 2, 0, 30, "{:.0f} centimetres"),      # last: one push left from the first
 )
+
+
+def set_values(values: dict, items) -> None:
+    """--set KEY=VALUE overrides (e.g. push=6 glide=1.5), checked against the settings' keys."""
+    for item in items or ():
+        key, _, val = item.partition("=")
+        key = key.strip()
+        if key not in values or not val:
+            known = ", ".join(s.key for s in SETTINGS)
+            raise SystemExit(f"--set {item}: expected KEY=VALUE with KEY one of: {known}")
+        values[key] = float(val)
 
 
 class Tuning:
@@ -101,8 +151,12 @@ class Tuning:
     def defaults(cls, spec: stickspec.StickSpec, fit: grab.Fit, params: pk.Params) -> dict:
         return {"length_in": spec.length_m / INCH, "lie": spec.lie, "curve_in": spec.curve_depth_m / INCH,
                 "face_open": spec.face_open_deg, "flex": spec.flex, "roll": fit.roll_deg, "pitch": fit.pitch_deg,
-                "yaw": fit.yaw_deg, "ice_mu": params.ice_mu, "pop": params.blade_pop, "grip": params.blade_grip,
-                "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000}
+                "yaw": fit.yaw_deg, "ice_mu": params.ice_mu, "grip": params.blade_grip,
+                "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING,
+                "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
+                "skate": rig.MOVE_MS, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
+                "push": 0.0, "glide": 0.0, "stop": 0.0, "carve": 0.0, "back": 1.0, "side": 1.0,
+                "snap": SNAP_DEG, "vignette": VIGNETTE, "check": COMFORT_CHECK_MIN, "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
         v = self.values
@@ -114,10 +168,13 @@ class Tuning:
 
     def apply(self, params: pk.Params) -> None:
         params.ice_mu = self.values["ice_mu"]
-        params.blade_pop = self.values["pop"]
+        params.air_k = self.values["air"] / 1000
+        params.board_bounce = self.values["boards"]
         params.blade_grip = self.values["grip"]
         params.forgiveness = self.values["forgive_cm"] / 100
         params.puck_mass = self.values["puck_g"] / 1000
+        params.magnet = self.values["magnet"]
+        params.release = self.values["release"]
 
     @property
     def current(self) -> Setting:
@@ -125,7 +182,15 @@ class Tuning:
 
     def describe(self) -> str:
         s = self.current
-        return f"{s.label}, {s.fmt.format(self.values[s.key])}"
+        v = self.values[s.key]
+        return f"{s.label}, {s.zero if s.zero and v == 0 else s.fmt.format(v)}"
+
+    def drive(self, d: rig.Drive) -> None:
+        """The skating settings onto the thumbstick drive."""
+        v = self.values
+        d.move_ms, d.turn_deg_s = v["skate"], v["turn"]
+        d.push, d.glide, d.stop_ms2, d.carve = v["push"], v["glide"], v["stop"], v["carve"]
+        d.back, d.side = v["back"], v["side"]
 
     def pick(self, d: int) -> None:
         self.i = (self.i + d) % len(SETTINGS)
@@ -167,6 +232,9 @@ class Play:
         self.fitting = False                   # Y: the stick held in the right hand while you fit it
         self.sounds: queue.SimpleQueue = queue.SimpleQueue()   # sounds by name (go, whistle, a hit)
         self.bus = Bus()                       # every contact, from the physics: the sound and buzz play from it
+        self.rig = rig.Rig()                   # where the room sits in the world: the thumbsticks move it
+        self.want_teleport = None              # (world point, world direction): put your head there, facing that way
+        self.ahead_ns = 0.0                    # how far ahead of now the frames are displayed (the physics samples there)
 
     def retune(self) -> None:
         self.spec = self.tuning.spec()
@@ -258,12 +326,15 @@ class Physics:
         self.last_buzz = 0.0
         self.tick = 0
         self.shots = []
+        self._last_sweet = None
+        self._last_yaw = 0.0
         self._refresh()
 
     def _refresh(self) -> None:
         pl = self.play
         spec = pl.spec
         self.grab.configure(spec, pl.fit)
+        pl.sim.flex.damping = pl.tuning.values.get("hands", pk.Flex.DAMPING)   # the "hands" setting
         pl.sim.flex.set_flex(spec.flex)
         self.edge_b, self.edge_t = spec.edge(8), spec.edge(8, top=True)
         self.sweet, self.u, self.zf = spec.sweet, spec.u, spec.z_forehand
@@ -337,14 +408,43 @@ class Physics:
     def _step(self, dt_s: float, R, p, held: bool) -> float:
         """Move the puck (and the stick's flex) one controller sample on."""
         sim = self.play.sim
+        yaw = getattr(self.play, "rig_yaw", 0.0)
+        if held:
+            a = R @ self.sweet + p
+            last = self._last_sweet
+            if last is not None and float(np.linalg.norm(a - last)) > JUMP_M:
+                sim._last = None                        # a snap turn or a teleport: don't sweep the blade
+                self._carry(a, last, yaw - self._last_yaw)
+            self._last_sweet = a
+        else:
+            self._last_sweet = None
+        self._last_yaw = yaw
         if held:
             bot_e = self.edge_b @ R.T + p
             top_e = self.edge_t @ R.T + p
-            imp = sim.step(dt_s, bot_e, top_e, R @ self.sweet + p, R @ self.u)
+            anchor = R @ self.sweet + p
+            # the ice assist: a blade hovering just over the ice rests on it (you can't feel the ice)
+            drop = pk.ice_assist(float(bot_e[:, 1].min()), self.play.tuning.values.get("ice", 0.0) / 100)
+            if drop:
+                bot_e[:, 1] -= drop
+                top_e[:, 1] -= drop
+                anchor[1] -= drop
+            imp = sim.step(dt_s, bot_e, top_e, anchor, R @ self.u, body=getattr(self.play, "body", None))
         else:
             imp = sim.step(dt_s, None, None)
         self.last_impulse = imp
         return imp
+
+    def _carry(self, a, last, dyaw: float) -> None:
+        """A puck on the blade when you snap-turn (or are moved) goes with it."""
+        pz = self.play.sim.puck
+        if pz.in_net or float(np.linalg.norm((pz.pos - last)[[0, 2]])) > 0.4:
+            return
+        c, s = np.cos(dyaw), np.sin(dyaw)
+        Ry = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+        d = Ry @ (pz.pos - last)
+        pz.pos = np.array([a[0] + d[0], pz.pos[1], a[2] + d[2]])
+        pz.vel = Ry @ pz.vel
 
     def _hands(self, state: int) -> list[str]:
         spec = self.play.spec
@@ -381,19 +481,7 @@ class Physics:
         """Free play: call shot speeds, goals, posts, the boards; bring back a puck that's gone."""
         pl, pz = self.play, self.play.sim.puck
         spec = pl.spec
-        # shots: a hard contact, then call the speed once it's away
-        if imp > 2.0 and pz.speed > 6.0:
-            if self.shot is None:
-                self.shot = [t, pz.speed]
-            else:
-                self.shot[1] = max(self.shot[1], pz.speed)
-        if self.shot is not None and t - self.shot[0] > 0.25:
-            mph = self.shot[1] * MPH
-            if mph > 12:
-                self.voice.say(f"{mph:.0f}", key="shot")
-                self.shots.append(round(mph, 1))
-                self.log.event(t, "shot", mph=round(mph, 1), ms=round(self.shot[1], 2))
-            self.shot = None
+        self._call_shot(t, imp)
         now = time.perf_counter()
         for kind, speed in pz.events:
             self.log.event(t, kind, ms=round(speed, 2))
@@ -414,6 +502,22 @@ class Physics:
                 self.respawn_at = t
         else:
             self.slow_since = None
+
+    def _call_shot(self, t: float, imp: float) -> None:
+        """Shots: a hard contact, then call the speed once it's away."""
+        pz = self.play.sim.puck
+        if imp > 2.0 and pz.speed > 6.0:
+            if self.shot is None:
+                self.shot = [t, pz.speed]
+            else:
+                self.shot[1] = max(self.shot[1], pz.speed)
+        if self.shot is not None and t - self.shot[0] > 0.25:
+            mph = self.shot[1] * MPH
+            if mph > 12:
+                self.voice.say(f"{mph:.0f}", key="shot")
+                self.shots.append(round(mph, 1))
+                self.log.event(t, "shot", mph=round(mph, 1), ms=round(self.shot[1], 2))
+            self.shot = None
 
     def _log_row(self, t: float, imp: float, state: int) -> None:
         sim = self.play.sim
@@ -530,13 +634,19 @@ def draw_hands_and_stick(line, play: Play, poses: dict, held: dict, stick, state
         shaft_c = (0.6, 0.66, 0.75) if loose else WHITE
         blade_c = (0.8, 0.65, 0.2) if loose else (1.0, 0.85, 0.1)
         bend = play.sim.bend
-        # the headset draws where the hands will be (~30-50 ms ahead of the physics): rest this
-        # stick on the ice itself so it is never drawn through it (more bend, then a slide)
-        bend, slide = pk.ice_rest(bend, float((spec.edge(9) @ R.T + p + bend)[:, 1].min()), R @ spec.u, pk.ICE_BEND)
+        # the ice assist, as the physics does it: the stick tilts down onto the ice (the shaft stays
+        # straight: the drop grows along it from the top hand)
+        down = np.array([0.0, -pk.ice_assist(float((spec.edge(9) @ R.T + p)[:, 1].min()),
+                                             play.tuning.values.get("ice", 0.0) / 100), 0.0])
+        # the headset draws where the hands will be (~45 ms ahead of the physics, unless PREDICT): rest
+        # this stick on the ice itself so it is never drawn through it (more bend, then a slide)
+        bend, slide = pk.ice_rest(bend, float((spec.edge(9) @ R.T + p + bend + down)[:, 1].min()), R @ spec.u,
+                                  pk.ICE_BEND)
+        slide = slide + down
         grip_s = spec.length_m - spec.grip_from_top_m
         s = np.linspace(spec.length_m, 0, 12)
         xi = np.clip((grip_s - s) / grip_s, 0, 1)
-        pts = (s[:, None] * spec.u) @ R.T + p + (xi ** 2)[:, None] * bend + slide
+        pts = (s[:, None] * spec.u) @ R.T + p + (xi ** 2)[:, None] * bend + slide - (1 - xi)[:, None] * down
         for p0, p1 in zip(pts, pts[1:]):
             line(p0, p1, shaft_c)
         for frac in (0.0, 0.33, 0.66, 1.0):
@@ -573,6 +683,107 @@ class Stick:
         return 0
 
 
+class Comfort:
+    """How the thumbsticks move you, and how you feel about it.
+
+    - rig.csv: every frame, the sticks, the drive's velocity, turn rate and mode, and the vignette.
+    - A queasiness check every `check` minutes of play (the "comfort check" setting; 0 = off): the
+      voice asks for 0-10, the left stick up/down picks it, a click answers it (you stand still
+      meanwhile). At STOP_AT or more it says to take a break (Farmani & Teather 2020: 4/10 is where
+      nausea became notable). Tune skating one change at a time against these ratings.
+    - summary(): for meta.json (time moving, hard accelerations, turn rates, the ratings)."""
+
+    TIMEOUT = 30.0
+    STOP_AT = 4
+    HARD = (2.0, 6.0)                 # m/s^2: accelerations counted (events above 2, time above 6)
+
+    def __init__(self, path: Path | None, voice, log):
+        self.voice, self.log = voice, log
+        self.fh = open(path, "w", newline="") if path is not None else None
+        if self.fh is not None:
+            self.fh.write("t,lx,ly,rx,moving,mode,vx,vz,speed,omega,accel,vignette\n")
+        self.stick = Stick()
+        self.asking_since: float | None = None
+        self.rating = 0
+        self.play_s = 0.0
+        self.next_check: float | None = None
+        self.ratings: list[dict] = []
+        self.prev_v: np.ndarray | None = None
+        self.stats = {"frames": 0, "moving_s": 0.0, "accel_events": 0, "over6_s": 0.0, "peak_accel": 0.0,
+                      "peak_turn_deg_s": 0.0, "vignette_s": 0.0}
+        self._over2 = False
+
+    @property
+    def asking(self) -> bool:
+        return self.asking_since is not None
+
+    def frame(self, now: float, t_sim: float, dt: float, sticks, moving: bool, drive, vel, omega: float,
+              vignette: float, every_min: float) -> None:
+        """Once a frame, after the drive: the log row and the stats; and whether to ask."""
+        a = 0.0 if self.prev_v is None or dt <= 0 else float(np.linalg.norm(vel - self.prev_v)) / dt
+        self.prev_v = np.array(vel, dtype=float)
+        speed = float(np.linalg.norm(vel))
+        s = self.stats
+        s["frames"] += 1
+        s["moving_s"] += dt if speed > 0.1 or omega else 0.0
+        if a > self.HARD[0] and not self._over2:
+            s["accel_events"] += 1
+        self._over2 = a > self.HARD[0]
+        s["over6_s"] += dt if a > self.HARD[1] else 0.0
+        s["peak_accel"] = max(s["peak_accel"], a)
+        s["peak_turn_deg_s"] = max(s["peak_turn_deg_s"], abs(math.degrees(omega)))
+        s["vignette_s"] += dt if vignette > 0.1 else 0.0
+        if self.fh is not None:
+            lx, ly, rx = sticks
+            self.fh.write(f"{t_sim:.3f},{lx:.3f},{ly:.3f},{rx:.3f},{int(moving)},{drive.mode},{vel[0]:.3f},"
+                          f"{vel[2]:.3f},{speed:.3f},{omega:.4f},{a:.2f},{vignette:.2f}\n")
+        self.play_s += dt
+        if every_min <= 0:
+            self.next_check = None
+            return
+        if self.next_check is None:
+            self.next_check = self.play_s + every_min * 60
+        if not self.asking and self.play_s >= self.next_check:
+            self.asking_since, self.rating = now, 0
+            self.voice.say("Comfort check. How queasy are you, zero to ten? Left stick up or down, then click it.",
+                           key="comfort")
+        if self.asking and now - self.asking_since > self.TIMEOUT:
+            self.asking_since = None
+            self.next_check = self.play_s + every_min * 60
+            self.log.event(t_sim, "comfort", rating=None)
+
+    def pick(self, ly: float, now: float) -> None:
+        """While asking: the left stick up or down picks the number."""
+        d = self.stick.update(ly, now)
+        if d:
+            self.rating = int(np.clip(self.rating + d, 0, 10))
+            self.voice.say(str(self.rating), key="comfort")
+
+    def answer(self, t_sim: float, every_min: float) -> None:
+        """The click: the rating is in."""
+        r = self.rating
+        self.asking_since = None
+        self.next_check = self.play_s + every_min * 60 if every_min > 0 else None
+        self.ratings.append({"t": round(t_sim, 1), "play_min": round(self.play_s / 60, 1), "rating": r})
+        self.log.event(t_sim, "comfort", rating=r)
+        print(f"  comfort: {r}/10 after {self.play_s / 60:.1f} min", flush=True)
+        self.voice.say(f"{r}. Time for a break: take the headset off." if r >= self.STOP_AT else f"{r}. Thanks.",
+                       key="comfort")
+
+    def summary(self) -> dict:
+        s = dict(self.stats)
+        mins = max(self.play_s / 60, 1e-9)
+        return {"play_min": round(self.play_s / 60, 2), "moving_min": round(s["moving_s"] / 60, 2),
+                "accel_events_per_min": round(s["accel_events"] / mins, 1), "over6_s": round(s["over6_s"], 2),
+                "peak_accel": round(s["peak_accel"], 1), "peak_turn_deg_s": round(s["peak_turn_deg_s"]),
+                "vignette_min": round(s["vignette_s"] / 60, 2), "ratings": self.ratings}
+
+    def close(self) -> None:
+        if self.fh is not None:
+            self.fh.close()
+            self.fh = None
+
+
 class SandboxMode:
     """Free play: what X, A, B and the left-stick click do, what is drawn, what is said first.
     A drill (drill.py) is another mode with the same methods."""
@@ -589,8 +800,9 @@ class SandboxMode:
         return self.physics
 
     def intro(self) -> str:
-        return ("Sandbox. Squeeze the grips to hold the stick. Left stick left and right picks a setting, "
-                "up and down changes it. X gives you a new puck. Y fits the stick in your hand.")
+        return ("Sandbox. Squeeze the grips to hold the stick. Left stick moves you, right stick turns you. "
+                "Click the left stick to tune the settings instead. X gives you a new puck. "
+                "Y fits the stick in your hand.")
 
     def first_head(self) -> None:
         self.play.want_recenter = True
@@ -614,6 +826,10 @@ class SandboxMode:
 
     def frame(self, now: float) -> None:
         """Once a frame, in the render thread."""
+
+    def confine(self, head_world, vel: np.ndarray, dt: float) -> np.ndarray:
+        """The thumbsticks' velocity, allowed where you are (the sandbox: anywhere)."""
+        return vel
 
     def draw(self, poses: dict, held: dict, stick, state: int) -> np.ndarray:
         return scene(self.play, self.play.sim.puck.rink, poses, held, stick, state)
@@ -639,6 +855,8 @@ def main() -> None:
     ap.add_argument("--no-sound", action="store_true", help="no ice / puck sounds")
     ap.add_argument("--audio-device", default="Oculus", help="part of the output device's name (default: the Quest over Link)")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--set", action="append", metavar="KEY=VALUE",
+                    help="a setting for this run, e.g. --set push=6 --set glide=1.5 (keys as in sandbox_settings.json)")
     args = ap.parse_args()
 
     base = stickspec.from_height(stickspec.parse_height(args.height), args.shoots)
@@ -646,6 +864,7 @@ def main() -> None:
     values = Tuning.defaults(base, fit, pk.Params())
     if SETTINGS_PATH.exists() and not args.fresh:
         values.update(json.loads(SETTINGS_PATH.read_text())["values"])
+    set_values(values, args.set)
     play = Play(Tuning(base, values))
     run_dir = HERE / "data" / ("sandbox-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
     lock = record.take_lock()
@@ -683,7 +902,8 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
         meta = {"created": dt.datetime.now().isoformat(timespec="seconds"), "kind": mode_cls.kind, "notes": args.notes,
                 "runtime": xr.get_instance_properties(ctx.instance).runtime_name.decode(),
                 "system": xr.get_system_properties(ctx.instance, ctx.system_id).system_name.decode(),
-                "settings_start": dict(play.tuning.values), "rate_hz": 1000, "lag_ms": 0, "space": "stage"}
+                "settings_start": dict(play.tuning.values), "rate_hz": 1000, "lag_ms": 0, "space": "stage",
+                "predict": PREDICT}
         print(f"{mode_cls.kind}: {meta['system']} | recording to {run_dir}")
         inputs = record.Inputs(ctx)
         renderer = record.LineRenderer()
@@ -694,7 +914,10 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
             import physics_core
             print(f"  physics compiled/loaded in {physics_core.warm():.1f} s", flush=True)
         sampler.on_tick = physics
+        sampler.rig = play.rig
+        sampler.predict = PREDICT
         sampler.start()
+        qpc_now = ctypes.wintypes.LARGE_INTEGER()
 
         def watchdog():                              # the frame loop stalls while the headset sleeps
             while True:
@@ -713,13 +936,19 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
         version = play.version
         top_hand_dev = play.spec.top_hand
         pick, change = Stick(), Stick()
+        drive = rig.Drive()
+        comfort = Comfort(run_dir / "rig.csv", voice, log)
+        snap_ready, tunnel = True, 0.0
+        moving = True                                # the left stick moves you (else it tunes the settings)
         prev = {"x": False, "a": False, "b": False, "y": False, "lclick": False}
         last_change, announced = 0.0, True
-        click_since, click_done = None, False
+        click_since, click_done, click_centred = None, False, True
         last_status, away_since = 0.0, None
         head_seen = False
+        fr = {"n": 0, "work": 0.0, "max": 0.0, "moved": 0, "t0": time.perf_counter(), "samples": 0}
         try:
             for frame_state in ctx.frame_loop():
+                t_work = time.perf_counter()
                 now = time.time()
                 focused = ctx.session_state == xr.SessionState.FOCUSED
                 inp = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False, "x": False, "y": False,
@@ -736,31 +965,77 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 for d in recfmt.CONTROLLERS:
                     play.squeeze[d] = inp["squeeze"].get(d, 0.0)
                 t_disp = frame_state.predicted_display_time
-                poses = {}
+                dt_frame = frame_state.predicted_display_period / 1e9 if frame_state.predicted_display_period else 1 / 72
+                # how far ahead this frame will be on the display: the physics samples the hands there
+                ctypes.windll.kernel32.QueryPerformanceCounter(ctypes.byref(qpc_now))
+                lead = t_disp - xr.convert_win32_performance_counter_to_time_khr(ctx.instance, qpc_now).value
+                if 0 < lead < AHEAD_MAX_NS:
+                    play.ahead_ns += (lead - play.ahead_ns) * (1.0 if play.ahead_ns == 0 else 0.05)
+                room = {}                                    # poses in the room, then in the world
                 for dev, space, loc in zip(recfmt.CONTROLLERS, inputs.spaces, disp_loc):
                     r = xr.check_result(xr.raw_functions.xrLocateSpace(space, ctx.space, t_disp, ctypes.byref(loc)))
                     if not r.is_exception() and (loc._location_flags & record.NEED_POSE) == record.NEED_POSE:
                         o, q = loc.pose.orientation, loc.pose.position
-                        poses[dev] = (stickmath.quat_to_mat(np.array([o.x, o.y, o.z, o.w])), np.array([q.x, q.y, q.z]))
+                        room[dev] = (stickmath.quat_to_mat(np.array([o.x, o.y, o.z, o.w])), np.array([q.x, q.y, q.z]))
+                head_room = None
                 r = xr.check_result(xr.raw_functions.xrLocateSpace(inputs.head, ctx.space, t_disp, ctypes.byref(head_loc)))
                 if not r.is_exception() and (head_loc._location_flags & record.NEED_POSE) == record.NEED_POSE:
                     o, q = head_loc.pose.orientation, head_loc.pose.position
-                    play.head = (stickmath.quat_to_mat(np.array([o.x, o.y, o.z, o.w])), np.array([q.x, q.y, q.z]))
+                    head_room = (stickmath.quat_to_mat(np.array([o.x, o.y, o.z, o.w])), np.array([q.x, q.y, q.z]))
+                tp = play.want_teleport
+                if tp is not None and head_room is not None:  # e.g. back to centre ice after a goal
+                    play.want_teleport = None
+                    play.rig.teleport(t_disp * 1e-9, *rig.place_head(*head_room, *tp))
+                    drive.stop()
+                rp = play.rig.at(t_disp * 1e-9)              # the room in the world at this frame
+                poses = {dev: rp.pose(*pose) for dev, pose in room.items()}
+                if head_room is not None:
+                    play.head = rp.pose(*head_room)
                     if not head_seen:
                         head_seen = True
                         mode.first_head()
 
+                # ---- moving: the left stick slides you (where you look is forward), the right stick
+                # turns you about your head (not while fitting: it fits the stick then)
+                lx, ly = inp["lthumb"]
+                tv = play.tuning.values
+                play.tuning.drive(drive)
+                rx = 0.0 if play.fitting else inp["thumb"][0]
+                pivot = play.head[1] if play.head is not None else rp.off
+                if tv["snap"] > 0:                          # snap turns: one step per flick of the stick
+                    if snap_ready and abs(rx) > 0.7:
+                        play.rig.snap(t_disp * 1e-9, -np.sign(rx) * np.radians(tv["snap"]), pivot)
+                        snap_ready = False
+                    elif abs(rx) < 0.35:
+                        snap_ready = True
+                    rx = 0.0
+                skating = moving and not comfort.asking            # standing still while you answer
+                vel, omega = drive.update((lx, ly) if skating else (0.0, 0.0), rx,
+                                          play.head[0] if play.head is not None else None, dt_frame)
+                vel = drive.vel = mode.confine(play.head[1] if play.head is not None else None, vel, dt_frame)
+                play.rig.drive(t_disp * 1e-9, vel, omega, pivot)
+                # the comfort vignette closes in with the thumbsticks' motion (not your own)
+                want = min(1.0, float(np.linalg.norm(vel)) / max(drive.move_ms, 0.5) * 1.3
+                           + abs(omega) / np.radians(max(drive.turn_deg_s, 1.0)))
+                if drive.mode == "stop":                        # held closed through a hockey stop
+                    want = 1.0
+                tunnel += (want - tunnel) * (1 - np.exp(-dt_frame / (0.08 if want > tunnel else 0.25)))
+                if focused:                                     # play time only (not while the headset sleeps)
+                    comfort.frame(now, sampler.shared.t_now, dt_frame, (lx, ly, rx), moving, drive, vel, omega,
+                                  tunnel * tv["vignette"], tv["check"])
+                if comfort.asking:
+                    comfort.pick(ly, now)
+
                 # ---- tuning and buttons
                 tu = play.tuning
-                lx, ly = inp["lthumb"]
                 horiz = abs(lx) > abs(ly) + 0.25          # only a clearly sideways push picks a setting,
                 vert = abs(ly) > abs(lx) + 0.25           # only a clearly up/down push changes it
-                d = pick.update(lx if horiz else 0.0, now)
+                d = pick.update(lx if horiz and not moving else 0.0, now)
                 if d:
                     tu.pick(d)
                     voice.say(tu.describe(), key="setting")
                     announced = True
-                d = change.update(ly if vert else 0.0, now)
+                d = change.update(ly if vert and not moving and not comfort.asking else 0.0, now)
                 if d and tu.change(d):
                     play.retune()
                     last_change, announced = now, False
@@ -773,20 +1048,31 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     voice.say("Stick fitting. Right stick turns and tilts it. Hold B and push to swing it. "
                               "A saves." if play.fitting else "Fitting off, not saved.", key="fit")
                 if play.fitting:
-                    dt_s = frame_state.predicted_display_period / 1e9 if frame_state.predicted_display_period else 1 / 72
-                    new_fit = record.apply_thumbstick(play.fit, inp["thumb"], inp["b"], dt_s)
+                    new_fit = record.apply_thumbstick(play.fit, inp["thumb"], inp["b"], dt_frame)
                     if new_fit != play.fit:
                         tu.values.update(roll=new_fit.roll_deg, pitch=new_fit.pitch_deg, yaw=new_fit.yaw_deg)
                         play.retune()
                 if inp["x"] and not prev["x"]:
                     mode.button("x", sampler.shared.t_now)
-                # recentering only on a deliberate 1 s press of the stick (pushing it hard clicks it)
+                # the left stick's click, only with the stick centred (pushing it hard clicks it too):
+                # a quick press switches it between moving you and tuning; a 1 s press recenters
                 if inp["lclick"]:
-                    click_since = click_since or now
-                    if now - click_since > 1.0 and not click_done:
+                    if click_since is None:
+                        click_since, click_centred = now, True
+                    click_centred = click_centred and max(abs(lx), abs(ly)) < 0.35
+                    if now - click_since > 1.0 and click_centred and not click_done:
                         click_done = True
                         mode.recenter()
                 else:
+                    if (click_since is not None and click_centred and not click_done and now - click_since < 0.5
+                            and comfort.asking):
+                        comfort.answer(sampler.shared.t_now, tv["check"])
+                    elif click_since is not None and click_centred and not click_done and now - click_since < 0.5:
+                        moving = not moving
+                        voice.say("Moving. Left stick moves you, right stick turns you." if moving else
+                                  f"Tuning. {tu.describe()}", key="setting")
+                        announced = True
+                        log.event(sampler.shared.t_now, "left_stick", mode="move" if moving else "tune")
                     click_since, click_done = None, False
                 if inp["b"] and not prev["b"] and not play.fitting:
                     mode.button("b", sampler.shared.t_now)
@@ -828,15 +1114,32 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
 
                 held = {top: dgrab.on["t"], bot: dgrab.on["b"]}
                 verts = mode.draw(poses, held, (R, p), state)
+                world_to_room = rp.inverse()
+                strength = tunnel * play.tuning.values["vignette"]
+                mesh = record.tunnel_mesh(strength) if strength > 0.02 else None
                 for view in ctx.view_loop(frame_state):
                     proj = np.asarray(Matrix4x4f.create_projection_fov(GraphicsAPI.OPENGL, view.fov, 0.05, 100.0).m)
-                    renderer.draw(verts, proj @ record.view_matrix(view.pose), (0.05, 0.06, 0.09))
+                    renderer.draw(verts, proj @ record.view_matrix(view.pose) @ world_to_room, (0.05, 0.06, 0.09))
+                    if mesh is not None:
+                        renderer.tunnel(mesh)
+                w = time.perf_counter() - t_work               # this frame's work, not the wait for the headset
+                fr["n"] += 1
+                fr["work"] += w
+                fr["max"] = max(fr["max"], w)
+                fr["moved"] += bool(omega or vel.any())
                 if now - last_status > 2:
                     last_status = now
                     st = sounds.stats
                     au = (f"audio {sounds.latency_ms:.0f} ms late {st.get('late', 0)} under {st.get('underruns', 0)}"
                           if st else "audio winsound")
-                    print(f"  t={play.t_now:6.1f}s  samples/s={sampler.n / max(play.t_now, 1e-9):.0f}  "
+                    el = time.perf_counter() - fr["t0"]
+                    hz = 1e9 / frame_state.predicted_display_period if frame_state.predicted_display_period else 0
+                    fps = (f"fps {fr['n'] / el:.0f}/{hz:.0f} frame {fr['work'] / max(fr['n'], 1) * 1000:.1f} ms "
+                           f"max {fr['max'] * 1000:.0f}{' moving' if fr['moved'] else ''}  "
+                           f"physics {(sampler.n - fr['samples']) / el:.0f}/s"
+                           f"{f' ahead {play.ahead_ns / 1e6:.0f} ms' if sampler.predict else ''}")
+                    fr.update(n=0, work=0.0, max=0.0, moved=0, t0=time.perf_counter(), samples=sampler.n)
+                    print(f"  t={play.t_now:6.1f}s  {fps}  "
                           f"stick={grab.STATE_NAMES[play.stick_state]:<12} {mode.status()}  {au}  "
                           f"setting: {tu.describe()}", flush=True)
         except KeyboardInterrupt:
@@ -844,9 +1147,13 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
         finally:
             sampler.stop_evt.set()
             sampler.join(timeout=5)
-            meta.update(samples=sampler.n, settings_end=dict(play.tuning.values), spec=play.spec.to_dict(),
+            comfort.close()
+            meta.update(samples=sampler.n, ahead_ms=round(play.ahead_ns / 1e6, 1), comfort=comfort.summary(),
+                        settings_end=dict(play.tuning.values), spec=play.spec.to_dict(),
                         fit=play.fit.to_dict(), params=play.params.to_dict(), phases=[], completed=True,
                         ended="quit", **mode.meta())
+            if play.rig.moved:                      # rec.csv holds world poses: the room as the thumbsticks moved it
+                meta["space"] = "stage, moved by the thumbsticks (world)"
             meta["audio"] = {"device": sounds.device_name, "latency_ms": round(sounds.latency_ms, 1)
                              if sounds.latency_ms == sounds.latency_ms else None, **sounds.stats}
             recfmt.write_meta(run_dir, meta)

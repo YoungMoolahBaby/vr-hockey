@@ -133,3 +133,55 @@ def test_the_compiled_step_is_fast():
         sim.step(0.001, *e)
     per = (time.perf_counter() - t) / len(path)
     assert per < 150e-6, f"{per * 1e6:.0f} us per step"
+
+
+@pytest.mark.parametrize("start,vel", [((0.3, 30.0), (0.0, 14.0)),         # into the far net
+                                       ((-0.2, 12.0), (0.0, -14.0)),        # into the home net
+                                       ((5.0, 40.0), (6.0, 10.0)),          # rimmed round a far corner
+                                       ((-8.0, 22.5), (-9.0, 3.0)),         # off the side boards at centre
+                                       ((4.0, 43.6), (-10.0, 0.0))])        # into the side of the far net
+def test_compiled_arena_puck_follows_the_reference(start, vel):
+    import arena as ar
+    params = pk.Params(ice_mu=0.05, board_bounce=0.55)
+    rink = ar.Arena(zn.Zone(np.array([1.0, 0.0, -2.0]), np.array([0.6, 0.0, 0.8])))
+    sims = []
+    for fast in (False, True):
+        sim = pk.Sim(params, pk.Rink(), 70)
+        sim.puck = ar.ArenaPuck(params, rink)
+        sim.puck.place(*start, *vel)
+        sims.append(sim)
+    for _ in range(4000):
+        pk.FAST = False
+        sims[0].step(0.001, None, None)
+        pk.FAST = True
+        sims[1].step(0.001, None, None)
+    a, b = sims
+    pk.FAST = True
+    assert np.allclose(a.puck.pos, b.puck.pos, atol=1e-9) and np.allclose(a.puck.vel, b.puck.vel, atol=1e-9)
+    assert [e[0] for e in a.puck.events] == [e[0] for e in b.puck.events]
+    assert (a.puck.in_net, a.puck.nets) == (b.puck.in_net, b.puck.nets)
+    x, z = rink.zone.xz(a.puck.pos)
+    assert rink.boards_contact(x, z, 0.0) is None                   # still on the ice
+
+
+def test_arena_nets_say_which_end():
+    import arena as ar
+    params = pk.Params()
+    rink = ar.Arena(zn.Zone(np.zeros(3), np.array([0.0, 0.0, 1.0])))
+    for (z0, vz), net, ev in (((30.0, 14.0), 2, "net2"), ((12.0, -14.0), 1, "net")):
+        sim = pk.Sim(params, pk.Rink(), 70)
+        sim.puck = ar.ArenaPuck(params, rink)
+        sim.puck.place(0.1, z0, 0.0, vz)
+        for _ in range(3000):
+            sim.step(0.001, None, None)
+        assert sim.puck.in_net == net
+        assert ev in [e[0] for e in sim.puck.events]
+
+
+def test_warm_runs():
+    """The app compiles the kernel with warm() before the 1 kHz loop: its call must match sim_step."""
+    import physics_core
+    assert physics_core.warm() < 120
+    import dataclasses
+    # warm() passes 13 parameters (prm); a new Params field must be added there too
+    assert len(dataclasses.fields(pk.Params)) == 13

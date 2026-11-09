@@ -138,6 +138,11 @@ class Sampler(threading.Thread):
         self.errors = 0
         self.writer = threading.Thread(target=self._write_loop, args=(csv_path,), daemon=True, name="writer")
         self.on_tick = None      # optional: on_tick(t_s, {dev: (R, p) or None}) after each sample (the sandbox physics)
+        self.rig = None          # optional rig.Rig (thumbstick locomotion): poses are recorded and ticked in the world
+        # sample where the hands will be when the frame is on the display (shared.ahead_ns, kept by the
+        # render loop), not where they are now: the physics then moves the stick the headset draws,
+        # not one ~40 ms behind it (a puck that followed a blade you'd seen leave it)
+        self.predict = False
         self.qpc_freq = wintypes.LARGE_INTEGER()
         ctypes.windll.kernel32.QueryPerformanceFrequency(ctypes.byref(self.qpc_freq))
         # reusable output structs: location -> velocity chain for controllers, plain for the head
@@ -176,30 +181,43 @@ class Sampler(threading.Thread):
             kernel.QueryPerformanceCounter(ctypes.byref(qpc))
             t_s = (qpc.value - qpc0) / freq
             xt = xr.convert_win32_performance_counter_to_time_khr(self.inst, qpc).value - self.lag_ns
+            if self.predict:
+                xt += int(sh.ahead_ns)
             row = [round(t_s, 6), xt, sh.phase]
             tick = {}
+            rp = self.rig.at(xt * 1e-9) if self.rig is not None and self.rig.moved else None
+            if rp is not None:                   # your body's motion, for the physics' soft hands
+                sh.body = (rp.vel[0], rp.vel[2], rp.omega, rp.pivot[0], rp.pivot[2])
+                sh.rig_yaw = rp.yaw              # and your turn (a snap turn carries the puck on your blade)
             for dev, space, loc, vel in zip(recfmt.CONTROLLERS, self.ctrl_spaces, self.loc, self.vel):
                 squeeze = round(sh.squeeze[dev], 3)
                 if self._locate(space, loc, xt):
                     f = loc._location_flags
                     po, pp = loc.pose.orientation, loc.pose.position
                     lv, av = vel.linear_velocity, vel.angular_velocity
-                    row += [f, round(pp.x, 6), round(pp.y, 6), round(pp.z, 6),
-                            round(po.x, 7), round(po.y, 7), round(po.z, 7), round(po.w, 7),
-                            vel._velocity_flags, round(lv.x, 5), round(lv.y, 5), round(lv.z, 5),
-                            round(av.x, 5), round(av.y, 5), round(av.z, 5), squeeze]
+                    P, Q = (pp.x, pp.y, pp.z), (po.x, po.y, po.z, po.w)
+                    LV, AV = (lv.x, lv.y, lv.z), (av.x, av.y, av.z)
+                    if rp is not None:                 # the room, moved by the thumbsticks, into the world
+                        P, Q = rp.point(*P), rp.quat(*Q)
+                        LV, AV = rp.velocity(P, *LV), rp.spin(*AV)
+                    row += [f, round(P[0], 6), round(P[1], 6), round(P[2], 6),
+                            round(Q[0], 7), round(Q[1], 7), round(Q[2], 7), round(Q[3], 7),
+                            vel._velocity_flags, round(LV[0], 5), round(LV[1], 5), round(LV[2], 5),
+                            round(AV[0], 5), round(AV[1], 5), round(AV[2], 5), squeeze]
                     sh.latest_flags[dev] = f
                     if self.on_tick is not None and (f & NEED_POSE) == NEED_POSE:
-                        tick[dev] = (stickmath.quat_to_mat(np.array([po.x, po.y, po.z, po.w])),
-                                     np.array([pp.x, pp.y, pp.z]))
+                        tick[dev] = (stickmath.quat_to_mat(np.array(Q)), np.array(P))
                 else:
                     row += [0] * (len(recfmt.CTRL_FIELDS) - 1) + [squeeze]
                     sh.latest_flags[dev] = 0
             if self._locate(self.head_space, self.head_loc, xt):
                 hl = self.head_loc
                 po, pp = hl.pose.orientation, hl.pose.position
-                row += [hl._location_flags, round(pp.x, 6), round(pp.y, 6), round(pp.z, 6),
-                        round(po.x, 7), round(po.y, 7), round(po.z, 7), round(po.w, 7)]
+                P, Q = (pp.x, pp.y, pp.z), (po.x, po.y, po.z, po.w)
+                if rp is not None:
+                    P, Q = rp.point(*P), rp.quat(*Q)
+                row += [hl._location_flags, round(P[0], 6), round(P[1], 6), round(P[2], 6),
+                        round(Q[0], 7), round(Q[1], 7), round(Q[2], 7), round(Q[3], 7)]
             else:
                 row += [0] * len(recfmt.HEAD_FIELDS)
             self.buf.append(row)
@@ -430,6 +448,38 @@ void main() { frag = vec4(vcol, 1.0); }
 """
 
 
+TUNNEL_VS = """#version 410
+layout(location = 0) in vec3 pa;
+out float va;
+void main() { gl_Position = vec4(pa.xy, 0.0, 1.0); va = pa.z; }
+"""
+TUNNEL_FS = """#version 410
+in float va;
+out vec4 frag;
+void main() { frag = vec4(0.0, 0.0, 0.0, va); }
+"""
+
+
+def tunnel_mesh(strength: float, n: int = 48) -> np.ndarray:
+    """The comfort vignette in clip space: triangles (x, y, alpha), clear in the middle, fading to
+    black toward the edges; stronger closes it in. strength 0-1."""
+    s = float(np.clip(strength, 0.0, 1.0))
+    r1 = 1.45 - 0.8 * s                    # fully dark from here out
+    r0 = r1 - 0.35                         # clear inside this
+    a = np.linspace(0, 2 * np.pi, n + 1)
+    c, si = np.cos(a), np.sin(a)
+    rings = [(r0, 0.0), (r1, 1.0), (3.0, 1.0)]
+    tris = []
+    for (ra, aa), (rb, ab) in zip(rings, rings[1:]):
+        for k in range(n):
+            p00 = (ra * c[k], ra * si[k], aa)
+            p01 = (ra * c[k + 1], ra * si[k + 1], aa)
+            p10 = (rb * c[k], rb * si[k], ab)
+            p11 = (rb * c[k + 1], rb * si[k + 1], ab)
+            tris += [p00, p10, p11, p00, p11, p01]
+    return np.asarray(tris, dtype=np.float32)
+
+
 def _compile(src, kind):
     s = GL.glCreateShader(kind)
     GL.glShaderSource(s, src)
@@ -457,6 +507,39 @@ class LineRenderer:
         GL.glEnableVertexAttribArray(1)
         GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 24, ctypes.c_void_p(12))
         GL.glBindVertexArray(0)
+        self._uploaded = None
+        # the comfort vignette: its own little program, drawn over each eye's view
+        self.tprog = GL.glCreateProgram()
+        for src, kind in ((TUNNEL_VS, GL.GL_VERTEX_SHADER), (TUNNEL_FS, GL.GL_FRAGMENT_SHADER)):
+            GL.glAttachShader(self.tprog, _compile(src, kind))
+        GL.glLinkProgram(self.tprog)
+        if not GL.glGetProgramiv(self.tprog, GL.GL_LINK_STATUS):
+            raise RuntimeError(GL.glGetProgramInfoLog(self.tprog).decode())
+        self.tvao = GL.glGenVertexArrays(1)
+        self.tvbo = GL.glGenBuffers(1)
+        GL.glBindVertexArray(self.tvao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.tvbo)
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 12, ctypes.c_void_p(0))
+        GL.glBindVertexArray(0)
+        self._tunnel = None
+
+    def tunnel(self, mesh: np.ndarray) -> None:
+        """Draw the vignette over what's drawn (after draw(), in the same view)."""
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glUseProgram(self.tprog)
+        GL.glBindVertexArray(self.tvao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.tvbo)
+        if mesh is not self._tunnel:                     # once per frame, not per eye
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, mesh.nbytes, mesh, GL.GL_DYNAMIC_DRAW)
+            self._tunnel = mesh
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(mesh))
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(0)
+        GL.glDisable(GL.GL_BLEND)
+        GL.glEnable(GL.GL_DEPTH_TEST)
 
     def draw(self, verts: np.ndarray, mvp: np.ndarray, clear) -> None:
         GL.glClearColor(*clear, 1.0)
@@ -467,7 +550,9 @@ class LineRenderer:
         GL.glUniformMatrix4fv(self.mvp_loc, 1, GL.GL_TRUE, np.ascontiguousarray(mvp, dtype=np.float32))
         GL.glBindVertexArray(self.vao)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, verts.nbytes, verts, GL.GL_DYNAMIC_DRAW)
+        if verts is not self._uploaded:                  # the same frame's second eye: already there
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, verts.nbytes, verts, GL.GL_DYNAMIC_DRAW)
+            self._uploaded = verts
         GL.glDrawArrays(GL.GL_LINES, 0, len(verts))
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)

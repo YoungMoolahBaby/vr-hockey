@@ -110,8 +110,14 @@ Your stick, a puck and a net, laid out in front of you. Play, and tune everythin
 
 **Controls:**
 - **Grip buttons:** hold the stick (as above).
-- **Left stick left/right:** pick a setting. The voice says which, and its value.
-- **Left stick up/down:** change it (hold to keep changing).
+- **Left stick:** move you around the ice (`rig.py`). Forward is where you look; it eases in
+  and out, or skates with hockey limits (push, glide, hockey stop, turn limit) if you turn them on
+  (below).
+- **Right stick left/right:** turn you, about your head (not while fitting), smoothly. Set "snap
+  turn" (e.g. 30 degrees) to turn in steps instead, one per flick.
+- **Click the left stick (a quick press):** switch the left stick to tuning, and back:
+  - **Left/right:** pick a setting. The voice says which, and its value.
+  - **Up/down:** change it (hold to keep changing).
 - **X:** a new puck, on your blade.
 - **Y:** fit the stick in your hand. The right stick turns and tilts it; hold B and push to swing
   it; A saves the fit; Y again leaves without saving.
@@ -119,12 +125,58 @@ Your stick, a puck and a net, laid out in front of you. Play, and tune everythin
 - **B:** say the current setting again.
 - **A:** save the settings (`sandbox_settings.json`, used by the drills too).
 
-**Settings:**
+Moving needs no play space: stand or sit, and skate with the stick.
+- **Sliding** is continuous in time, so the 1 kHz physics sees your blade glide.
+- **A snap turn** (or the game's move to a faceoff) is a deliberate jump. The physics doesn't
+  sweep the blade across it, and a puck on your blade turns with you.
+- **The recording** (`rec.csv`) holds your hands in the world, so replays line up with the puck.
+
+**Settings** (any of them for one run: `--set KEY=VALUE`, e.g. `--set push=6 --set glide=1.5`; the
+keys are those in `sandbox_settings.json`):
 - stick length, lie, curve depth, face open, flex
 - forgiveness (extra reach for catching the puck)
-- puck weight, ice friction
-- blade pop, blade grip
-- buzz strength
+- puck weight
+- **The puck** (`reports/Hockey physics feel.md` has the evidence):
+  - ice friction: default 0.085. The one on-ice measurement found 0.07-0.12.
+  - air drag (`air`): default 4.3 per km (`Params.air_k` 0.0043 per m), 0 = off. It equals the
+    ice's friction at about 14 m/s, so hard passes and shots slow down; stickhandling doesn't
+    change.
+  - board bounce (`boards`): default 0.30, for the boards, glass and posts. A frozen puck off a
+    rigid plate measured 0.26; the old 0.55 sent rebounds back to the slot.
+  - hands: default 0.60, the stick's damping. It, not the blade's restitution, sets how hard a puck
+    comes back off a still blade; higher gives a softer catch. It replaces "blade pop", which
+    barely did anything (the restitution is now the measured 0.30 and not a setting). The
+    low-speed bounce fade is gone: rubber bounces more at low speed, not less.
+- blade grip, buzz strength
+- skate speed (default 3 m/s), snap turn (default 0 = smooth; 30 turns in 30-degree steps) and smooth turn speed
+  (default 150 deg/s): the thumbsticks, everywhere
+- **The skating model** (`rig.Drive`): each limit is off by default, so it skates as it always did.
+  Try them one at a time, in this order, with the comfort check on:
+  - push (`push`, m/s²): speed up at most this hard, easing in at the top, half as hard
+    backwards. Try 6 (a rec skater's first strides; 95% of 3 m/s in about 0.55 s), or 4 to be
+    gentler. Off, the old easing starts every push at 20 m/s² (2 g).
+  - glide (`glide`, m/s²): let go of the stick, or ease off it, and you coast, slowing at this
+    rate. Try 1.5 (2 s and 3 m from 3 m/s), then 1.0, then 0.5 on later days. Off, letting go
+    stops you within half a metre. In the rink, the boards stop a glide gently.
+  - hockey stop (`stop`, m/s²): hold the left stick more than 120° against your motion to stop
+    at this rate, then push the new way. Try 8, or 6 to be gentler. The vignette stays closed
+    through it.
+  - turn limit (`carve`, m/s²): your path can't bend harder than this sideways. A glance doesn't
+    whip it round, the right stick's turn is capped at speed (115°/s at 3 m/s for 6), and turning
+    carves your path with you. Try 6, then 8.
+  - backward and sideways speed (`back`, `side`): a share of forwards. Try 0.8 and 0.5.
+- comfort vignette (default 0.7): the view's edges darken while the thumbsticks move you (0 = off)
+- comfort check (`check`, default every 4 min; 0 = off): the voice asks how queasy you are, 0-10.
+  Push the left stick up or down to pick the number (you stand still meanwhile), then click it.
+  At 4 or more it says to take a break. Every frame of the thumbsticks' motion goes to `rig.csv`,
+  and a summary to `meta.json` (`comfort`).
+- ice assist (default 16 cm; 0 = off): a blade within this of the ice rests on it, everywhere.
+  Nothing stops your hands at the ice, so you can't feel it. In the first free skate the blade
+  hovered 2.5-30 cm up, and the puck slid under it at 70% of its crossings. From 16 to 32 cm the
+  blade rises back to your hands, smoothly, so the physics never sees a jump. Higher, it's where
+  you hold it. To hop the blade over the puck, lift your hands about the band. It's the last
+  setting: one push left from the first.
+- soft hands and shot release: off (honest physics), everywhere by default
 
 **What you hear and feel:**
 - **Sounds:** a tap when the blade lands, a dull "thock" off the puck, a ping off the posts, a
@@ -181,7 +233,7 @@ the ice and press A. The zone is laid out so your blade sits at the end boards, 
 - **X:** skip the rep
 - **Hold the left stick in (1 s):** lay the zone out again
 
-The grips, Y fitting and left-stick tuning work as in the sandbox.
+The grips, moving and turning, Y fitting and left-stick tuning work as in the sandbox.
 
 ## Drill: the power-play point (shoot, or set one up)
 
@@ -219,6 +271,69 @@ uv run python drill.py --drill pp
   retrieval drill's.
 - **Pressure** is how soon F1 reaches you. It adapts, with the same warm-up.
 - **The map** shows each play's goal chance as a bar; green is the best.
+
+## Game: 3 on 3
+
+```powershell
+uv run python game.py                     # first to 5
+uv run python game.py --to 3 --level 0.8  # shorter, against a slower team
+uv run python game.py --skate 3.5         # your top speed (m/s at full stick; default 4)
+uv run python game.py --free              # free skate: you, a puck and a goalie in each net
+uv run python game.py --free --empty      # ... with both nets empty
+```
+
+**Free skate** (`--free`) is the same rink with no skaters but you, for getting used to skating
+with the thumbsticks:
+- A goalie in each net (`threes.Goalies`, the game's goalies on their own). He saves what he gets
+  a piece of, either as a rebound or by covering it. He covers a slow puck at his feet, then
+  passes it back out to your blade. A puck through him in close is checked even on your stick,
+  so go round him or shoot.
+- Soft hands are off, as in the game.
+- Shot speeds and goals are called out, and after a goal a puck comes back to your stick.
+- The buttons do what they do in the sandbox: X puts a puck on your stick, B says the setting,
+  and A saves the settings. That includes the comfort ones, and the game uses them too.
+
+You and two AI teammates (blue) against three (orange), with a goalie in each net, on a whole rink:
+- **The rink** (`arena.py`): regulation width, corners and nets, 46 m long (regulation is 61:
+  `--length`).
+- **No offside or icing.** The score hangs over centre ice.
+
+**Playing it:**
+- You start at centre ice, facing the net you attack. Your goalie is behind you.
+- Press A to drop the puck. After a goal, everyone lines up at centre again, and you're moved
+  there.
+- Skate with the left stick and turn with the right. Your stick is the real physics stick.
+- **Soft hands** are off: honest physics, as everywhere. With the ice assist that felt right. On,
+  their pull within 4 cm of the blade felt like a magnetic field. `--magnet 0.7` turns them on:
+  - While your blade moves at handling speed, a puck on it rides the blade instead of flying off.
+  - Swing faster than the shot release speed (`--release`, default 4 m/s) and it comes off as
+    hit. Skating doesn't count: speeds are taken relative to you.
+  - It is `physics_core.cradle`, inside the 1 kHz step, so it adds no delay.
+- **The other team is never faster than 95% of your skate speed** (they were skating 5.8 m/s to
+  your 4).
+- Your teammates pass to you when you're open (a pass is led to your blade).
+- The other team marks you goal side and pokes at the puck while you carry it.
+- To get the puck back, knock it off their carrier's stick with yours, or skate into him.
+
+**The AI** (`threes.py`) ticks 50 times a second:
+- **The carrier** skates for the slot, away from defenders. Every quarter second or so he shoots,
+  passes to the most dangerous open teammate (you included), or keeps going. Shots are valued with
+  the goalie model, against the real goalie.
+- **His teammates** take the back door and the high slot.
+- **The other team** marks man to man, goal side. Whoever has the carrier pressures him.
+- **A loose puck:** each team's quickest skater goes for it (not your teammates, if you're closer).
+- **The goalies** are the drills' rec goalie, one per end. After a save there's a rebound, or he
+  covers it and plays it out a second later.
+- **AI against AI** (no you): about 1.4 goals a minute and 28% shooting. Shots are even between the
+  teams over 16 games.
+
+**Controls:**
+- **A:** drop the puck (a new game when one is over)
+- **B:** say the score
+- **X:** faceoff at centre now
+- **Hold the left stick in (1 s):** lay the rink out around you again (the score stays)
+
+The grips, moving and turning, Y fitting and left-stick tuning work as in the sandbox.
 
 ## Findings so far
 
@@ -280,11 +395,12 @@ Next: tuning, after the feel research (`../reports/`).
 | `xrcheck.py` | runtime and headset check |
 | `sandbox.py` | free play: the stick, a puck and a net, with settings tuned in the headset; its physics tick, drawing and frame loop are reused by the drills |
 | `puck.py` | the puck, the blade contact, the shaft flex, the ice (the Python reference; `FAST` runs it compiled) |
-| `physics_core.py` | the same physics compiled with numba (nogil): what the app runs; tested against `puck.py` to 1e-9 |
+| `physics_core.py` | the same physics compiled with numba (nogil): what the app runs; tested against `puck.py` to 1e-9. Also soft hands (`cradle`, off unless `Params.magnet`; the reference runs the same function uncompiled) |
 | `contacts.py` | the contact bus: every contact from the 1 kHz physics, which the sound and the buzz play from |
 | `audio.py` | the mixer: a low-latency stream to the headset, each contact placed at its own sample |
 | `sounds.py` | the synthesized sounds (tap, thock, ping, thud, go, whistle) |
 | `stickmath.py` | rotations and quaternions |
+| `rig.py` | thumbstick locomotion: where the room sits in the world, moved continuously in time so the physics never sees a jump |
 | `replay.py`, `touches.py` | replay a recorded session's hands through the physics; measure every blade-puck touch (does the puck leave faster than the blade?) |
 | `drill.py` | the drill app (a sandbox mode): lays out the zone, runs reps, draws the skaters and the after-rep map |
 | `retrieval.py` | module 1's logic, without XR: scenarios, the time-to-intercept value model, forecheckers, shoulder-check tracking, scoring, the staircase |
@@ -292,4 +408,7 @@ Next: tuning, after the feel research (`../reports/`).
 | `figures.py` | line-drawn skaters and the goalie |
 | `powerplay.py` | the power-play drill's logic: the box's reads, expected goals per play, the rep with real shots and one-timers |
 | `goalie.py` | a rec goalie: angle, screens, saves, and expected goals from the same model |
-| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing |
+| `game.py` | the 3-on-3 app (a sandbox mode): lays out the rink, runs the game, draws the skaters, goalies and score; `--free` for free skate on the same rink |
+| `threes.py` | the 3-on-3 game's logic, without XR: possession, the AI's choices and positions, both goalies, faceoffs, goals |
+| `arena.py` | the whole rink: both ends from zone.py (the far one turned round), its puck (both nets), markings, the scoreboard |
+| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out), and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |

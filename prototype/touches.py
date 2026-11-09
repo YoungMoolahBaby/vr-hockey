@@ -44,6 +44,8 @@ def touches(run_dir, overrides: dict | None = None, until_s: float | None = None
     values.update(overrides or {})
     play = sandbox.Play(sandbox.Tuning(spec.with_(length_m=spec.length_m), values))
     play.retune()
+    if "pop" in (overrides or {}):                       # no longer a setting (it barely matters): the param
+        play.params.blade_pop = overrides["pop"]
     phys = sandbox.Physics(play, _Quiet(), _Quiet())
     ev = [json.loads(line) for line in open(run_dir / "events.jsonl")]
     drops = [(e["t"], np.array(e["at"])) for e in ev if e["event"] == "puck"]

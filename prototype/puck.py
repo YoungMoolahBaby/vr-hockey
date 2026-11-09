@@ -17,6 +17,7 @@ the puck). The blade is infinitely heavy compared with the puck.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -33,17 +34,26 @@ POST_R = 0.03
 
 @dataclass
 class Params:
-    ice_mu: float = 0.05         # sliding friction on the ice (lower = faster ice; 0.02 felt like air hockey)
-    blade_pop: float = 0.20      # restitution off the blade (a frozen rubber puck is dead-ish)
+    ice_mu: float = 0.085        # sliding friction on the ice (Jon's pick; the one on-ice measurement found
+                                 # 0.07-0.12; 0.02 felt like air hockey). reports/Hockey physics feel.md
+    blade_pop: float = 0.30      # restitution off the blade: a frozen puck off a rigid plate is ~0.27. Barely
+                                 # matters: the light, damped flex sets the bounce (Flex.damping, "hands")
     puck_mass: float = 0.170     # kg (a regulation puck is 156-170 g; heavier feels heavier)
     blade_grip: float = 0.35     # friction along the blade face (cupping, dragging)
     blade_thickness: float = 0.012
     forgiveness: float = 0.01    # extra reach around the blade for catching the puck (m)
-    soft_hands: float = 3.0      # m/s: below this impact speed the bounce fades out (0.5 m/s: none), so a
-                                 # stickhandled puck stays on the blade; hard hits get the full pop
-    ice_bounce: float = 0.25
-    board_bounce: float = 0.55
+    soft_hands: float = 0.0      # m/s: below this impact speed the bounce fades out (0.5 m/s: none). OFF: rubber
+                                 # bounces more at low speed, not less (an assist, and it did nothing measurable)
+    ice_bounce: float = 0.20
+    board_bounce: float = 0.30   # boards, glass, posts: a frozen puck at 55 mph off a rigid plate e = 0.26
+                                 # (0.55 was a warm puck dropped slowly: rebounds came back to the slot)
     net_bounce: float = 0.08
+    magnet: float = 0.0          # soft hands, 0-1 (physics_core.cradle): 0 = honest physics (the sandbox, the
+                                 # drills); the 3v3 game turns it up
+    release: float = 4.0         # m/s: blade or puck faster than this (relative to you) is a shot or pass: no cradle
+                                 # (Jon's stickhandling, 3v3 2026-11-09: 99% under 3.2 m/s; shots 10+)
+    air_k: float = 0.0043        # 1/m: air drag, dv/dt = -air_k v^2 (1/2 rho Cd A / m, Cd ~0.6 side-on: an
+                                 # estimate; no measured puck Cd). Equals the ice's friction at ~14 m/s
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -131,16 +141,19 @@ class Puck:
     def _integrate(self, h: float) -> None:
         p, v = self.pos.copy(), self.vel.copy()
         on_ice = p[1] <= H / 2 + 1e-4 and v[1] <= 1e-6
+        k = self.params.air_k
         if on_ice:
             p[1], v[1] = H / 2, 0.0
             s = float(np.hypot(v[0], v[2]))
-            dec = self.params.ice_mu * G * h
+            dec = (self.params.ice_mu * G + k * s * s) * h  # the ice (Coulomb), and the air
             if s <= dec:
                 v[0] = v[2] = 0.0
             else:
                 v[[0, 2]] *= 1 - dec / s
         else:
             v[1] -= G * h
+            if k > 0:                                       # the air, on a puck in flight
+                v *= 1 - min(k * float(np.linalg.norm(v)) * h, 1.0)
         if self.in_net:
             v *= 0.97                                   # the mesh soaks it up
         p += v * h
@@ -271,6 +284,92 @@ ICE_BEND = 0.12           # m: how far the ice may bow the shaft before the stic
                           # hands (Jon: "the top hand slips down"). The bow is drawn but stores NO energy:
                           # when the ice loaded the flex spring, a stick held low fired a resting puck at
                           # 6 m/s once it let go (session 2).
+def slide(v0, t, mu: float, k: float):
+    """How far a puck sliding at v0 (m/s) goes in t s on ice of friction mu with air drag k (1/m):
+    dv/dt = -(mu g + k v^2), to a stop. Arrays broadcast."""
+    v0, t = np.asarray(v0, dtype=float), np.asarray(t, dtype=float)
+    a = mu * G
+    if k <= 0:
+        if a <= 0:
+            return v0 * t
+        tt = np.minimum(t, v0 / a)
+        return v0 * tt - 0.5 * a * tt * tt
+    if a <= 0:
+        return np.log1p(k * v0 * t) / k
+    w = math.sqrt(a * k)
+    phi0 = np.arctan(v0 * math.sqrt(k / a))
+    tt = np.minimum(t, phi0 / w)
+    return np.log(np.cos(phi0 - w * tt) / np.cos(phi0)) / k
+
+
+def slide_stop(v0: float, mu: float, k: float) -> float:
+    """Where it stops (m); inf on frictionless ice with no drag."""
+    a = mu * G
+    if k <= 0:
+        return v0 * v0 / (2 * a) if a > 0 else math.inf
+    if a <= 0:
+        return math.inf
+    return math.log1p(k * v0 * v0 / a) / (2 * k)
+
+
+def speed_after(v0: float, x: float, mu: float, k: float) -> float:
+    """Its speed after sliding x m (0 if it stops short)."""
+    a = mu * G
+    if k <= 0:
+        return math.sqrt(max(v0 * v0 - 2 * a * x, 0.0))
+    if a <= 0:
+        return v0 * math.exp(-k * x)
+    return math.sqrt(max((v0 * v0 + a / k) * math.exp(-2 * k * x) - a / k, 0.0))
+
+
+def launch_speed(v1: float, x: float, mu: float, k: float) -> float:
+    """The speed to send it at so it still has v1 after x m."""
+    a = mu * G
+    if k <= 0:
+        return math.sqrt(v1 * v1 + 2 * a * x)
+    if a <= 0:
+        return v1 * math.exp(k * x)
+    return math.sqrt((v1 * v1 + a / k) * math.exp(2 * k * x) - a / k)
+
+
+def slide_time(v0: float, x: float, mu: float, k: float) -> float:
+    """How long it takes to slide x m (inf if it stops short)."""
+    a = mu * G
+    if x <= 0:
+        return 0.0
+    if k <= 0:
+        if a <= 0:
+            return x / v0 if v0 > 0 else math.inf
+        d = v0 * v0 - 2 * a * x
+        return (v0 - math.sqrt(d)) / a if d >= 0 else math.inf
+    if a <= 0:
+        return math.expm1(k * x) / (k * v0) if v0 > 0 else math.inf
+    phi0 = math.atan(v0 * math.sqrt(k / a))
+    c = math.cos(phi0) * math.exp(k * x)
+    return (phi0 - math.acos(c)) / math.sqrt(a * k) if c <= 1 else math.inf
+
+
+ICE_ASSIST = 0.16         # m: a blade this close above the ice rests on it (the "ice assist" setting).
+                          # Free skate 2026-11-09: the puck crossed the blade line under a hovering
+                          # blade 70% of the time; with 12 cm it would have been 37%, 16 cm 26%, 20 cm 19%
+                          # (lifting the blade over the puck takes a hand lift of about the band, though)
+ICE_PRESS = 0.002         # m: ... pressed this far in, so it counts as on the ice (a touchdown tick)
+
+
+def ice_assist(low: float, band: float) -> float:
+    """How far to lower the stick whose blade's lowest point is `low` (m above the ice).
+
+    In VR nothing stops your hands at the ice, so you can't feel it: a free blade hovered 2.5 to 30 cm
+    over it and a puck slid under it at 70% of its crossings (free skate 2026-11-09). So a blade
+    within `band` of the ice rests on it; from band to 2*band it rises back to where your hands
+    hold it (continuously: the physics sees no jump), and above that it is where they hold it. A blade
+    pressed into the ice is left to ice_rest. 0 for band <= 0 (off)."""
+    if band <= 0 or low <= -ICE_PRESS or low >= 2 * band:
+        return 0.0
+    if low <= band:
+        return low + ICE_PRESS
+    h = -ICE_PRESS + (low - band) * (2 * band + ICE_PRESS) / band
+    return low - h
 BLADE_MASS = 0.15         # kg: a light composite blade and lower shaft (Jon: "a rubber heavy puck against
                           # a light flexible composite stick"); the damping keeps it from bouncing back
                           # into the puck
@@ -292,8 +391,10 @@ class Flex:
     the blade back. Deflection is measured at the blade, across the shaft."""
 
     MAX_BEND = 0.15
+    DAMPING = 0.60            # the damping ratio: hands damp a stick. This, not blade_pop, sets how hard a
+                              # puck comes back off a still blade (0.6: 0.13-0.17 of its speed; 0.3: 0.27)
 
-    def __init__(self, flex: float, mass: float = BLADE_MASS, damping: float = 0.60):   # hands damp a stick
+    def __init__(self, flex: float, mass: float = BLADE_MASS, damping: float = DAMPING):
         self.mass = mass
         self.damping = damping
         self.set_flex(flex)
@@ -335,6 +436,7 @@ class Flex:
 FAST = True                # Sim.step runs compiled (physics_core.py); False: the Python reference
 _NO_EDGE = np.zeros((1, 3))
 _NO_VEC = np.zeros(3)
+_NO_BODY = np.zeros(5)
 
 
 class Sim:
@@ -367,7 +469,8 @@ class Sim:
         return bend
 
     def step(self, dt: float, rigid_bot: np.ndarray | None, rigid_top: np.ndarray | None,
-             anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4) -> float:
+             anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4,
+             body=None) -> float:
         """Advance dt with the rigid blade edges at the end of the step (None: no stick).
         anchor: the blade point the flex hangs on (world); shaft: unit shaft direction.
         Returns the biggest puck impulse (m/s) this step.
@@ -375,10 +478,10 @@ class Sim:
         With FAST on this runs compiled (physics_core.py, the same maths, without holding Python's
         lock); step_ref is the Python reference it is tested against."""
         if FAST:
-            return self._step_fast(dt, rigid_bot, rigid_top, anchor, shaft, substeps)
-        return self.step_ref(dt, rigid_bot, rigid_top, anchor, shaft, substeps)
+            return self._step_fast(dt, rigid_bot, rigid_top, anchor, shaft, substeps, body)
+        return self.step_ref(dt, rigid_bot, rigid_top, anchor, shaft, substeps, body)
 
-    def _step_fast(self, dt, rigid_bot, rigid_top, anchor, shaft, substeps) -> float:
+    def _step_fast(self, dt, rigid_bot, rigid_top, anchor, shaft, substeps, body=None) -> float:
         import physics_core as pc
         p, fl = self.puck, self.flex
         has = rigid_bot is not None
@@ -409,21 +512,25 @@ class Sim:
                       dtype=np.int64)
         pr = p.params
         prm = np.array([pr.ice_mu, pr.blade_pop, pr.puck_mass, pr.blade_grip, pr.blade_thickness,
-                        pr.forgiveness, pr.soft_hands, pr.ice_bounce, pr.board_bounce, pr.net_bounce])
+                        pr.forgiveness, pr.soft_hands, pr.ice_bounce, pr.board_bounce, pr.net_bounce,
+                        pr.magnet, pr.release, pr.air_k])
+        length = getattr(p, "arena_length", None)          # the whole rink (arena.py)
         if zone is None:
             rk = p.rink
             rkv = np.array([rk.origin[0], rk.origin[2], rk.fwd[0], rk.fwd[2], rk.goal_dist, rk.half_width,
                             rk.back, rk.end])
             kind = 0
         else:
-            rkv = np.array([zone.origin[0], zone.origin[2], zone.Z[0], zone.Z[2], 0.0, 0.0, 0.0, 0.0])
-            kind = 1
+            rkv = np.array([zone.origin[0], zone.origin[2], zone.Z[0], zone.Z[2],
+                            0.0 if length is None else length, 0.0, 0.0, 0.0])
+            kind = 1 if length is None else 2
         ev, nev = np.zeros((16, 2)), np.zeros(1, dtype=np.int64)
         con, scr = np.zeros(7), np.zeros(2)
         imp = pc.sim_step(dt, substeps, has, rigid_bot, rigid_top, anchor, shaft, lb, lt, la, ss,
-                          fx, fv, fs, fk, bend, slide, pos, vel, normal, pf, prm, kind, rkv, ev, nev, con, scr)
+                          fx, fv, fs, fk, bend, slide, pos, vel, normal, pf, prm, kind, rkv, ev, nev, con, scr,
+                          _NO_BODY if body is None else np.asarray(body, dtype=float))
         p.pos, p.vel, p._normal = pos, vel, normal
-        p.in_net, p.goals = bool(pf[0]), int(pf[1])
+        p.in_net, p.goals = (int(pf[0]) if kind == 2 else bool(pf[0])), int(pf[1])
         if zone is not None:
             p.cleared, p.nets = bool(pf[2]), int(pf[3])
         fl.x, fl.v = (fx if fs[0] else None), fv
@@ -441,7 +548,8 @@ class Sim:
         return float(imp)
 
     def step_ref(self, dt: float, rigid_bot: np.ndarray | None, rigid_top: np.ndarray | None,
-                 anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4) -> float:
+                 anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4,
+                 body=None) -> float:
         """The Python reference of step (see step)."""
         p = self.puck
         if rigid_bot is None:
@@ -476,6 +584,12 @@ class Sim:
                 if c is not None and c.impulse > 0:
                     biggest = max(biggest, c.impulse)
                     self.flex.v = self.flex.v + c.blade_dv          # the hit bends the blade back
+                pr = p.params
+                if pr.magnet > 0:                                   # soft hands: the same code, uncompiled
+                    import physics_core as pc
+                    pc.cradle.py_func(h, p.pos, p.vel, np.asarray(bot, dtype=float), vb_r + dv_bend, pr.magnet,
+                                      pr.release, pr.blade_thickness,
+                                      _NO_BODY if body is None else np.asarray(body, dtype=float))
             p._rink(h)
         self.bend = total_bend                              # the flex plus the ice's bow, at the step's end
         self._last = (rigid_bot, rigid_top, anchor)
