@@ -334,7 +334,7 @@ def _run_protocol(shared: Shared, voice: Voice, phases: list[protocol.Phase]) ->
 
 
 class Inputs:
-    """Grip poses, squeeze (grip button), both thumbsticks, A/B/X/Y, the left trigger, and haptics."""
+    """Grip poses, squeeze (grip button), both thumbsticks, A/B/X/Y, both triggers, and haptics."""
 
     PROFILE = "/interaction_profiles/oculus/touch_controller"
 
@@ -365,6 +365,7 @@ class Inputs:
         self.lthumb = make("left_thumbstick", A.VECTOR2F_INPUT, left)
         self.lclick = make("left_thumbstick_click", A.BOOLEAN_INPUT, left)
         self.ltrigger = make("left_trigger", A.FLOAT_INPUT, left)
+        self.rtrigger = make("right_trigger", A.FLOAT_INPUT, right)
         self.haptic = make("haptic", A.VIBRATION_OUTPUT, both)
         pairs = [(self.pose, "/user/hand/left/input/grip/pose"), (self.pose, "/user/hand/right/input/grip/pose"),
                  (self.squeeze, "/user/hand/left/input/squeeze/value"),
@@ -375,6 +376,7 @@ class Inputs:
                  (self.lthumb, "/user/hand/left/input/thumbstick"),
                  (self.lclick, "/user/hand/left/input/thumbstick/click"),
                  (self.ltrigger, "/user/hand/left/input/trigger/value"),
+                 (self.rtrigger, "/user/hand/right/input/trigger/value"),
                  (self.haptic, "/user/hand/left/output/haptic"), (self.haptic, "/user/hand/right/output/haptic")]
         bindings = (xr.ActionSuggestedBinding * len(pairs))(
             *[xr.ActionSuggestedBinding(act, xr.string_to_path(inst, path)) for act, path in pairs])
@@ -396,7 +398,7 @@ class Inputs:
     def read(self) -> dict:
         s = self.ctx.session
         out = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False,
-               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0}
+               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0, "rtrigger": 0.0}
         try:
             for d in ("l", "r"):
                 st = xr.get_action_state_float(s, self._info(self.squeeze, d))
@@ -412,6 +414,8 @@ class Inputs:
             out["lclick"] = bool(xr.get_action_state_boolean(s, self._info(self.lclick, "l")).current_state)
             st = xr.get_action_state_float(s, self._info(self.ltrigger, "l"))
             out["ltrigger"] = float(st.current_state) if st.is_active else 0.0
+            st = xr.get_action_state_float(s, self._info(self.rtrigger, "r"))
+            out["rtrigger"] = float(st.current_state) if st.is_active else 0.0
         except xr.XrException:
             pass
         return out

@@ -22,6 +22,7 @@ Controls
   grip buttons                  hold the stick (as in the sandbox)
   left thumbstick               skate (forward is where you look), up to your cruising speed
   left trigger                  sprint: the harder you squeeze, the faster, up to "sprint speed"
+  right trigger                 shoot: firm hands (released, soft hands that give with the puck)
   right thumbstick              turn (the "snap turn" setting turns you in steps instead; 0 = smooth)
   A                             drop the puck (a new game when one is over)
   B                             say the score

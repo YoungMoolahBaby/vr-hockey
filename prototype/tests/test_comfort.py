@@ -95,15 +95,18 @@ def test_the_settings_reach_the_drive_and_the_physics():
     spec = stickspec.from_height(1.73, "left")
     values = sandbox.Tuning.defaults(spec, grab.Fit(), pk.Params())
     sandbox.set_values(values, ["push=6", "glide=1.5", "stop=8", "carve=6", "back=0.8", "side=0.5",
-                                "hands=0.45", "boards=0.4", "air=0"])
+                                "hands=0.45", "handle=1.25", "boards=0.4", "air=0"])
     tu = sandbox.Tuning(spec, values)
     d = rig.Drive()
     tu.drive(d)
     assert (d.push, d.glide, d.stop_ms2, d.carve, d.back, d.side) == (6, 1.5, 8, 6, 0.8, 0.5)
     play = sandbox.Play(tu)
     assert play.params.board_bounce == 0.4 and play.params.air_k == 0.0
-    sandbox.Physics(play, _Quiet(), _Quiet())
-    assert play.sim.flex.damping == 0.45
+    physics = sandbox.Physics(play, _Quiet(), _Quiet())
+    assert play.sim.flex.damping == 1.25                     # stickhandling hands (trigger released)
+    play.shoot = 1.0
+    physics._firmness()
+    assert play.sim.flex.damping == 0.45                     # shooting hands (trigger squeezed)
     with pytest.raises(SystemExit):
         sandbox.set_values(values, ["nope=1"])
     tu.i = [s.key for s in sandbox.SETTINGS].index("glide")

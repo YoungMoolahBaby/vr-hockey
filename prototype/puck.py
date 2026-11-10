@@ -280,6 +280,8 @@ INCH = 0.0254
 LBF = 4.448
 FLEX_SPAN = 1.17          # m between the supports in a flex test (approximate)
 FLEX_LEVER = 0.80         # m from the bottom hand to the blade: the bending cantilever
+HOLD_JUMP = 60.0          # m/s: the ice's hold changing faster than this is a reset (the flex restarted,
+                          # the stick jumped), not motion (no blade goes this fast): no velocity from it
 ICE_BEND = 0.12           # m: how far the ice may bow the shaft before the stick slides up through the
                           # hands (Jon: "the top hand slips down"). The bow is drawn but stores NO energy:
                           # when the ice loaded the flex spring, a stick held low fired a resting puck at
@@ -560,21 +562,30 @@ class Sim:
             return 0.0
         anchor = rigid_bot.mean(axis=0) if anchor is None else anchor
         shaft = np.array([0.0, 1.0, 0.0]) if shaft is None else shaft
-        if self._last is None:
+        fresh = self._last is None
+        if fresh:
             self._last = (rigid_bot, rigid_top, anchor)
         b0, t0, a0 = self._last
         h = dt / substeps
         v_anchor = (anchor - a0) / dt
         vb_r, vt_r = (rigid_bot - b0) / dt, (rigid_top - t0) / dt
         biggest = 0.0
+        # the ice's hold (bow + slide) at the last step's end: its rate is part of the blade's velocity
+        hold_prev = self.bend - (self.flex.x - a0 if self.flex.x is not None else 0.0) + self.slide
         for k in range(substeps):
             s = (k + 1) / substeps
             a_s = a0 + s * (anchor - a0)
             self.flex.step(h, a_s, v_anchor, shaft)
             bot_r = b0 + s * (rigid_bot - b0)
+            own = self.flex.bend(a_s)
             bend = self._hold_on_ice(bot_r, a_s, shaft) if self.flex.x is not None else np.zeros(3)
             total_bend = bend
-            dv_bend = self.flex.v - v_anchor
+            hold = bend - own + self.slide
+            v_hold = (hold - hold_prev) / h
+            if fresh or float(np.abs(v_hold).max()) > HOLD_JUMP:
+                v_hold, fresh = np.zeros(3), False
+            hold_prev = hold
+            dv_bend = self.flex.v - v_anchor + v_hold
             bot = bot_r + bend + self.slide
             top = t0 + s * (rigid_top - t0) + bend + self.slide
             p._integrate(h)

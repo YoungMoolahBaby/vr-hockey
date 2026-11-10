@@ -7,6 +7,8 @@ Controls
   grip buttons (middle finger)  hold the stick: right = top hand, left = bottom hand (grab.py)
   left thumbstick               move you around the ice; forward is where you look (rig.py)
   left trigger (index finger)   sprint: squeeze to go faster than the stick alone, up to "sprint speed"
+  right trigger (index finger)  shoot: firm hands. Released, your hands are soft and give with the puck
+                                ("stickhandling hands"); squeeze and they firm up for a shot ("shooting hands")
   right thumbstick left/right   turn you, about your head: smoothly, or in steps per flick (the
                                 "snap turn" setting, degrees; 0 = smooth). The view's edges darken
                                 while you move ("comfort vignette")
@@ -92,6 +94,14 @@ SPRINT = 4.5             # m/s: the left trigger's top speed (rig.Drive.sprint_m
                          # "skate speed" (3); squeezing the trigger goes faster toward this, the harder the
                          # faster (a game's speed burst, by how hard you squeeze). Modest: Jon is prone to motion
                          # sickness, and it rose from 3 to 10 m/s in So et al. 2001. 0 = off ("sprint speed")
+HANDLE = 1.5             # the stick's damping (Flex.damping) while you stickhandle: soft hands that give with the
+                         # puck. The right trigger (top hand's index finger) firms them up to "shooting hands"
+                         # (the "hands" setting, 0.6), the harder you squeeze the firmer, for a shot. Jon asked
+                         # (2026-11-10) for the puck to spring off the stick less, with a shooting mode on the
+                         # trigger. Measured on a synthetic blade: a 4 m/s pass into a still blade comes back at
+                         # 11% at 0.6 and 0% at 1.5; a 1.5 m/s tap sends the puck off at 98% of the blade's speed
+                         # at 0.6 and 87% at 1.5; a wrist shot is ~5% slower at 1.5. Blade pop changes none of
+                         # these. 0 = off: always the shooting hands, as before ("stickhandling hands")
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
@@ -130,7 +140,8 @@ SETTINGS = (
     Setting("ice_mu", "ice friction", 0.005, 0.0, 0.15, "{:.3f}"),
     Setting("air", "air drag", 0.5, 0.0, 10.0, "{:g} per kilometre", "off"),            # Params.air_k x 1000
     Setting("boards", "board bounce", 0.05, 0.0, 0.9, "{:.2f}"),
-    Setting("hands", "hands", 0.05, 0.1, 1.0, "{:.2f}"),        # the stick's damping: higher gives a softer catch
+    Setting("hands", "shooting hands", 0.05, 0.1, 1.0, "{:.2f}"),   # the stick's damping, right trigger held
+    Setting("handle", "stickhandling hands", 0.25, 0.0, 3.0, "{:.2f}", "off"),   # ... and released (HANDLE)
     Setting("grip", "blade grip", 0.05, 0.0, 1.0, "{:.2f}"),
     Setting("buzz", "buzz", 0.1, 0.0, 1.0, "{:.1f}"),
     Setting("magnet", "soft hands", 0.1, 0.0, 1.0, "{:.1f}", "off"),
@@ -185,7 +196,7 @@ class Tuning:
         return {"length_in": spec.length_m / INCH, "lie": spec.lie, "curve_in": spec.curve_depth_m / INCH,
                 "face_open": spec.face_open_deg, "flex": spec.flex, "roll": fit.roll_deg, "pitch": fit.pitch_deg,
                 "yaw": fit.yaw_deg, "ice_mu": params.ice_mu, "grip": params.blade_grip,
-                "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING,
+                "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING, "handle": HANDLE,
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "sprint": SPRINT, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
                 "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
@@ -255,6 +266,7 @@ class Play:
         # what record.Sampler expects
         self.phase = "play"
         self.squeeze = {d: 0.0 for d in recfmt.CONTROLLERS}
+        self.shoot = 0.0                       # the right trigger, 0-1: firm hands for a shot (Physics._firmness)
         self.latest_flags = {d: 0 for d in recfmt.CONTROLLERS}
         self.t_now = 0.0
         # requests to the physics thread
@@ -324,7 +336,7 @@ class Log:
     def __init__(self, run_dir: Path):
         self.events = open(run_dir / "events.jsonl", "a", encoding="utf-8")
         self.puck = open(run_dir / "puck.csv", "w", encoding="utf-8")
-        self.puck.write("t,px,py,pz,vx,vy,vz,impulse,stick,bend_mm\n")
+        self.puck.write("t,px,py,pz,vx,vy,vz,impulse,stick,bend_mm,hands\n")   # hands: the damping in use
         self.lock = threading.Lock()
 
     def event(self, t: float, kind: str, **data) -> None:
@@ -369,11 +381,25 @@ class Physics:
         pl = self.play
         spec = pl.spec
         self.grab.configure(spec, pl.fit)
-        pl.sim.flex.damping = pl.tuning.values.get("hands", pk.Flex.DAMPING)   # the "hands" setting
         pl.sim.flex.set_flex(spec.flex)
+        self._firmness()
         self.edge_b, self.edge_t = spec.edge(8), spec.edge(8, top=True)
         self.sweet, self.u, self.zf = spec.sweet, spec.u, spec.z_forehand
         self.version = pl.version
+
+    def _firmness(self) -> None:
+        """The stick's damping this tick: the stickhandling hands, firmed up toward the shooting hands
+        as you squeeze the right trigger (resting fingers don't count; full by 0.95)."""
+        v = self.play.tuning.values
+        firm = v.get("hands", pk.Flex.DAMPING)
+        soft = v.get("handle", 0.0)
+        if soft > 0:
+            s = min(max((self.play.shoot - rig.TRIGGER_DEAD) / (1 - 2 * rig.TRIGGER_DEAD), 0.0), 1.0)
+            firm = firm * s + soft * (1 - s)          # (exactly each end at 0 and 1)
+        fl = self.play.sim.flex
+        if fl.damping != firm:
+            fl.damping = firm
+            fl.set_flex(fl.flex)                     # recomputes the damping coefficient
 
     def _blade_spot(self, R, p) -> np.ndarray:
         """A spot on the ice just off the forehand face."""
@@ -405,6 +431,7 @@ class Physics:
         pl = self.play
         if pl.version != self.version:
             self._refresh()
+        self._firmness()
         dt_s = 0.001 if self.last_t is None else float(np.clip(t - self.last_t, 0.0002, 0.01))
         self.last_t = t
         spec = pl.spec
@@ -559,7 +586,7 @@ class Physics:
         P, V = sim.puck.pos, sim.puck.vel
         b = np.linalg.norm(sim.bend) * 1000
         self.log.puck_row(f"{t:.4f},{P[0]:.4f},{P[1]:.4f},{P[2]:.4f},{V[0]:.3f},{V[1]:.3f},{V[2]:.3f},"
-                          f"{imp:.3f},{state},{b:.1f}\n")
+                          f"{imp:.3f},{state},{b:.1f},{sim.flex.damping:.2f}\n")
 
 
 # ----------------------------------------------------------------------------- drawing
@@ -1018,7 +1045,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 now = time.time()
                 focused = ctx.session_state == xr.SessionState.FOCUSED
                 inp = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False, "x": False, "y": False,
-                       "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0}
+                       "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0, "rtrigger": 0.0}
                 if focused:
                     xr.sync_actions(ctx.session, sync_info)
                     inp = inputs.read()
@@ -1030,6 +1057,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                         break
                 for d in recfmt.CONTROLLERS:
                     play.squeeze[d] = inp["squeeze"].get(d, 0.0)
+                play.shoot = inp.get("rtrigger", 0.0)          # firm hands for a shot (Physics._firmness)
                 t_disp = frame_state.predicted_display_time
                 dt_frame = frame_state.predicted_display_period / 1e9 if frame_state.predicted_display_period else 1 / 72
                 # how far ahead this frame will be on the display: the physics samples the hands there

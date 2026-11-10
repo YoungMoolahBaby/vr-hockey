@@ -41,6 +41,8 @@ def touches(run_dir, overrides: dict | None = None, until_s: float | None = None
     spec = StickSpec.from_dict(meta["spec"])
     values = sandbox.Tuning.defaults(spec, grab.Fit.from_dict(meta["fit"]), pk.Params())
     values.update(meta["settings_end"])                 # older sessions lack newer settings
+    if "handle" not in meta["settings_end"]:
+        values["handle"] = 0.0                          # recorded before the right trigger's soft hands
     values.update(overrides or {})
     play = sandbox.Play(sandbox.Tuning(spec.with_(length_m=spec.length_m), values))
     play.retune()

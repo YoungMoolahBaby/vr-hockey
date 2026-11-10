@@ -25,6 +25,7 @@ import zone as zn
 R, H, G = pk.R, pk.H, pk.G
 GOAL_HALF_W, GOAL_H, GOAL_DEPTH, POST_R = pk.GOAL_HALF_W, pk.GOAL_H, pk.GOAL_DEPTH, pk.POST_R
 ICE_BEND = pk.ICE_BEND
+HOLD_JUMP = pk.HOLD_JUMP
 Z_WIDTH, Z_CORNER_R, Z_GOAL_Z, Z_BLUE_Z = zn.WIDTH, zn.CORNER_R, zn.GOAL_Z, zn.BLUE_Z
 Z_NET_HALF_W, Z_NET_DEPTH, Z_NET_H, Z_POST_R, BOARD_MU = zn.NET_HALF_W, zn.NET_DEPTH, zn.NET_H, zn.POST_R, zn.BOARD_MU
 
@@ -577,6 +578,15 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
     vbc = np.empty((n, 3))
     vtc = np.empty((n, 3))
     total_bend = np.zeros(3)
+    # The ice's hold (its bow plus the slide up the shaft) moves the blade off the hands' path, so the
+    # blade's velocity at a contact must include how fast that hold changes: a blade pinned on the ice
+    # while the hands lift out of it is not moving up. Without this the hands' lift went into the puck
+    # (14-20 m/s launches, free skate 2026-11-09/10). The hold at the last step's end, from its state:
+    hold_prev = np.empty(3)
+    for k in range(3):
+        hold_prev[k] = bend_out[k] - ((fx[k] - last_anchor[k]) if fs[0] else 0.0) + slide[k]
+    fresh = ss[0] == 0
+    v_hold = np.zeros(3)
     for k_sub in range(substeps):
         s = (k_sub + 1) / substeps
         for k in range(3):
@@ -588,6 +598,7 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
         # hold on the ice (Sim._hold_on_ice)
         for k in range(3):
             bend[k] = fx[k] - a_s[k] if fs[0] else 0.0
+            dv_bend[k] = bend[k]                          # (the flex's own bend, for the hold below)
             sl[k] = 0.0
         low = 1e30
         for i in range(n):
@@ -602,10 +613,20 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
             scr[0] = max(scr[0], -low)
         elif low > 0.003:
             ss[1] = 0
+        jump = 0.0
+        for k in range(3):
+            hold = bend[k] - dv_bend[k] + sl[k]
+            v_hold[k] = (hold - hold_prev[k]) / h
+            jump = max(jump, abs(v_hold[k]))
+            hold_prev[k] = hold
+        if fresh or jump > HOLD_JUMP:                     # no last step, or the flex was reset: no rate
+            for k in range(3):
+                v_hold[k] = 0.0
+            fresh = False
         for k in range(3):
             slide[k] = sl[k]
             total_bend[k] = bend[k]
-            dv_bend[k] = fv[k] - v_anchor[k]
+            dv_bend[k] = fv[k] - v_anchor[k] + v_hold[k]
         for i in range(n):
             for k in range(3):
                 bot[i, k] = bot_r[i, k] + bend[k] + sl[k]

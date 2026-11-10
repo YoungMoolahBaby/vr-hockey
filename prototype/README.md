@@ -117,6 +117,9 @@ Your stick, a puck and a net, laid out in front of you. Play, and tune everythin
   cruising speed up to "sprint speed" (default 4.5 m/s; 0 = off). Like a hockey game's speed
   burst, but how hard you squeeze is how fast. You get there at the push limit, and coast back
   down at the glide when you let go.
+- **Right trigger (top hand's index finger):** shoot. Released, your hands are soft and give
+  with the puck ("stickhandling hands"). Squeeze it and they firm up for a shot ("shooting
+  hands"), the harder the firmer.
 - **Right stick left/right:** turn you, about your head (not while fitting), smoothly. Set "snap
   turn" (e.g. 30 degrees) to turn in steps instead, one per flick.
 - **Click the left stick (a quick press):** switch the left stick to tuning, and back:
@@ -147,9 +150,14 @@ keys are those in `sandbox_settings.json`):
     change.
   - board bounce (`boards`): default 0.30, for the boards, glass and posts. A frozen puck off a
     rigid plate measured 0.26; the old 0.55 sent rebounds back to the slot.
-  - hands: default 0.60, the stick's damping. It, not the blade's restitution, sets how hard a puck
-    comes back off a still blade; higher gives a softer catch. It replaces "blade pop", which
-    barely did anything (the restitution is now the measured 0.30 and not a setting). The
+  - stickhandling hands (`handle`) and shooting hands (`hands`): the stick's damping, which sets
+    how hard a puck springs off the blade; higher gives a softer catch. With the right trigger
+    released your hands are soft (default 1.50). Squeeze it and they firm up toward the shooting
+    hands (default 0.60) for a shot, the harder the firmer. On a synthetic blade, a 4 m/s pass into
+    a still blade comes back at 0% of its speed with soft hands and 11% with firm ones. A tap sends
+    the puck off at 87% of the blade's speed against 98%. A wrist shot with soft hands is about 5%
+    slower. `handle` 0 = off (always the shooting hands, as before). This replaces "blade pop",
+    which did nothing measurable (the restitution is now the measured 0.30 and not a setting). The
     low-speed bounce fade is gone: rubber bounces more at low speed, not less.
 - blade grip, buzz strength
 - skate speed (default 3 m/s), snap turn (default 0 = smooth; 30 turns in 30-degree steps) and smooth turn speed

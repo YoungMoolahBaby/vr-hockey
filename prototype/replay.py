@@ -43,6 +43,7 @@ def replay(run_dir, flex=None, pop=None, grip=None, verbose=True) -> list[dict]:
         if v is not None:
             values[k] = v
     play = sandbox.Play(sandbox.Tuning(spec, values))
+    play.shoot = 1.0                                     # shots: the right trigger squeezed (firm hands)
     if pop is not None:                                  # no longer a setting (it barely matters): the param
         play.params.blade_pop = pop
     physics = sandbox.Physics(play, _Quiet(), _Quiet())
