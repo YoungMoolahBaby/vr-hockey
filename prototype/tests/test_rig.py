@@ -241,3 +241,30 @@ def test_snap_turn_turns_about_your_head():
     assert after.yaw - before.yaw == pytest.approx(math.radians(30), abs=1e-6)
     h_room = np.linalg.solve(before.Ry, head - before.off)  # where that head is in the room
     assert np.allclose(np.array(after.point(*h_room))[[0, 2]], head[[0, 2]], atol=1e-5)   # you turned in place
+
+
+def test_the_left_trigger_sprints_the_harder_the_faster():
+    """The stick alone cruises at skate speed; the trigger raises it toward sprint speed, at the push
+    limit; easing off coasts back down at the glide."""
+    d = rig.Drive(move_ms=3.0)
+    d.push, d.glide, d.sprint_ms = 6.0, 1.5, 4.5
+
+    def go(n, boost):
+        vs = []
+        for _ in range(n):
+            v, _ = d.update((0.0, 1.0), 0.0, head_R(0), FRAME, boost=boost)
+            vs.append(np.linalg.norm(v))
+        return np.array(vs)
+
+    assert go(200, 0.0)[-1] == pytest.approx(3.0, abs=1e-3)        # cruising
+    assert go(10, 0.03)[-1] == pytest.approx(3.0, abs=1e-3)        # a resting finger: nothing
+    up = go(200, 1.0)
+    assert up[-1] == pytest.approx(4.5, abs=1e-3)                  # full squeeze: sprinting
+    assert np.diff(up).max() / FRAME <= 6.0 + 1e-6                 # got there at the push limit
+    assert go(300, 0.5)[-1] == pytest.approx(3.75, abs=1e-3)       # half: halfway
+    down = go(300, 0.0)
+    assert down[-1] == pytest.approx(3.0, abs=1e-3)
+    assert -np.diff(down).max() / FRAME <= 6.0 and np.diff(down).min() / FRAME >= -1.5 - 1e-6   # coasting back
+    assert d.top(1.0) == 4.5 and d.top(0.0) == 3.0
+    d.sprint_ms = 0.0                                              # off
+    assert d.top(1.0) == 3.0

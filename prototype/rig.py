@@ -20,6 +20,7 @@ import numpy as np
 MOVE_MS = 3.0                 # m/s at full stick (Jon's pick; 6, then 4 felt too fast in the 3v3: "skate speed")
 TURN_DEG_S = 150.0            # deg/s at full stick (90 felt too slow; tunable: "turn speed")
 DEAD = 0.15                   # stick deadzone
+TRIGGER_DEAD = 0.05           # the sprint trigger: resting fingers don't count; full by 0.95
 MOVE_TAU, TURN_TAU = 0.15, 0.08   # s: how quickly you get up to (and down from) speed
 
 
@@ -186,6 +187,9 @@ class Drive:
     - carve (m/s^2): your path can't bend harder than this sideways (a glance doesn't whip it round),
       the right stick's turn is capped to it at speed, and turning carves your path with you.
     - back, side: top speed backwards and sideways, as a share of forwards (1 = the same).
+    - sprint_ms (m/s): the left trigger's top speed. The stick alone tops out at move_ms (your
+      cruising speed); squeezing the trigger raises that toward sprint_ms, the harder the faster
+      (0, or no faster than move_ms: off). Getting there and back is the push and the glide.
     `mode` says what it did last: "still", "push", "coast", "stop" or "ease" (the old let-go)."""
 
     def __init__(self, move_ms: float = MOVE_MS, turn_deg_s: float = TURN_DEG_S):
@@ -193,6 +197,7 @@ class Drive:
         self.turn_deg_s = turn_deg_s
         self.push = self.glide = self.stop_ms2 = self.carve = 0.0
         self.back = self.side = 1.0
+        self.sprint_ms = 0.0
         self.vel = np.zeros(3)
         self.omega = 0.0
         self.mode = "still"
@@ -202,8 +207,14 @@ class Drive:
         self.omega = 0.0
         self.mode = "still"
 
-    def _want(self, move_xy, head_R) -> tuple[np.ndarray, float]:
-        """The velocity the left stick asks for (world), and how far it points backwards (0-1)."""
+    def top(self, boost: float = 0.0) -> float:
+        """Full stick's speed with the sprint trigger at boost (0-1): cruising up to sprinting."""
+        b = min(max((boost - TRIGGER_DEAD) / (1 - 2 * TRIGGER_DEAD), 0.0), 1.0)
+        return self.move_ms + max(self.sprint_ms - self.move_ms, 0.0) * b
+
+    def _want(self, move_xy, head_R, boost: float = 0.0) -> tuple[np.ndarray, float]:
+        """The velocity the left stick (and the sprint trigger) asks for (world), and how far it
+        points backwards (0-1)."""
         x, y = move_xy
         m = math.hypot(x, y)
         if m <= DEAD or head_R is None:
@@ -214,15 +225,17 @@ class Drive:
             return np.zeros(3), 0.0
         fwd = np.array([f[0] / n, 0.0, f[2] / n])
         right = np.array([-fwd[2], 0.0, fwd[0]])
-        speed = self.move_ms * _shape(min(m, 1.0))
+        speed = self.top(boost) * _shape(min(m, 1.0))
         ux, uy = x / m, y / m
         sx, sy = ux * self.side, uy * (1.0 if uy >= 0 else self.back)    # backwards, sideways: slower
         return speed * (sy * fwd + sx * right), max(0.0, -uy)
 
-    def update(self, move_xy, turn_x: float, head_R: np.ndarray | None, dt: float) -> tuple[np.ndarray, float]:
+    def update(self, move_xy, turn_x: float, head_R: np.ndarray | None, dt: float,
+               boost: float = 0.0) -> tuple[np.ndarray, float]:
         """move_xy: the left stick (x right, y forward); turn_x: the right stick's x (right = turn right);
-        head_R: the head's world rotation (forward = where you look). Returns (velocity, turn rate)."""
-        want, backward = self._want(move_xy, head_R)
+        head_R: the head's world rotation (forward = where you look); boost: the sprint trigger (0-1).
+        Returns (velocity, turn rate)."""
+        want, backward = self._want(move_xy, head_R, boost)
         v = self.vel
         speed = float(np.linalg.norm(v))
         want_s = float(np.linalg.norm(want))

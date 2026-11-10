@@ -6,6 +6,7 @@
 Controls
   grip buttons (middle finger)  hold the stick: right = top hand, left = bottom hand (grab.py)
   left thumbstick               move you around the ice; forward is where you look (rig.py)
+  left trigger (index finger)   sprint: squeeze to go faster than the stick alone, up to "sprint speed"
   right thumbstick left/right   turn you, about your head: smoothly, or in steps per flick (the
                                 "snap turn" setting, degrees; 0 = smooth). The view's edges darken
                                 while you move ("comfort vignette")
@@ -51,6 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
+import glfast  # noqa: F401  (first: PyOpenGL's error checking off, read when xr loads it)
 import numpy as np
 import xr
 from xr.utils.gl import ContextObject
@@ -75,6 +77,8 @@ SNAP_DEG = 0.0           # smooth turning (Jon's pick); 30 turns you in steps, t
 VIGNETTE = 0.7           # comfort: the view's edges darken while the thumbsticks move you (0 = off)
 GRID = 0.0               # the 2 m ice grid: off (a real rink has none; its lines sliding by under you are
                          # motion your inner ear doesn't feel). 1 = on (the "ice grid" setting)
+AA = 4.0                 # anti-aliasing: 4x multisampling (record.LineRenderer), so far lines and white edges
+                         # don't break into stair-steps that crawl as you move. 0 = off ("anti-aliasing")
 PUSH = 6.0               # m/s^2: the skating push limit (rig.Drive.push), the research's pick. ON: with it off
                          # (the old easing, 20-47 m/s^2 jolts) Jon got sick within seconds; 6 "was solid", and
                          # 6-10 felt fine at 3 and 4 m/s (free skate 2026-11-09). 0 = the old easing
@@ -84,6 +88,10 @@ STOP = 8.0               # m/s^2: the hockey stop, the left stick held against y
 CARVE = 6.0              # m/s^2: the turn limit, the path bends at most this hard sideways (rig.Drive.carve): the
                          # stick's turn tops out at 115 deg/s at 3 m/s. 6 "felt good"; 9 (no cap at 3 m/s) left
                          # Jon "a little motion sick" after 16 min (free skate 2026-11-10); 0 = off
+SPRINT = 4.5             # m/s: the left trigger's top speed (rig.Drive.sprint_ms): the stick alone cruises up to
+                         # "skate speed" (3); squeezing the trigger goes faster toward this, the harder the
+                         # faster (a game's speed burst, by how hard you squeeze). Modest: Jon is prone to motion
+                         # sickness, and it rose from 3 to 10 m/s in So et al. 2001. 0 = off ("sprint speed")
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
@@ -128,6 +136,7 @@ SETTINGS = (
     Setting("magnet", "soft hands", 0.1, 0.0, 1.0, "{:.1f}", "off"),
     Setting("release", "shot release", 0.5, 2.0, 9.0, "{:g} metres per second"),
     Setting("skate", "skate speed", 0.5, 1.0, 9.0, "{:g} metres per second"),
+    Setting("sprint", "sprint speed", 0.5, 0.0, 9.0, "{:g} metres per second", "off"),   # the left trigger
     # the skating model (rig.Drive): each off at 0, as it always was
     Setting("push", "push", 1, 0, 10, "{:g} metres per second squared", "off"),
     Setting("glide", "glide", 0.25, 0, 4, "slows {:g} metres per second squared", "off"),
@@ -139,6 +148,7 @@ SETTINGS = (
     Setting("turn", "smooth turn speed", 15, 45, 360, "{:.0f} degrees per second"),
     Setting("vignette", "comfort vignette", 0.1, 0.0, 1.0, "{:.1f}"),
     Setting("grid", "ice grid", 1, 0, 1, "on", "off"),
+    Setting("aa", "anti-aliasing", 4, 0, 4, "{:.0f} times", "off"),
     Setting("check", "comfort check", 1, 0, 15, "every {:g} minutes", "off"),   # a 0-10 queasiness check
     Setting("ice", "ice assist", 2, 0, 30, "{:.0f} centimetres"),      # last: one push left from the first
 )
@@ -177,9 +187,9 @@ class Tuning:
                 "yaw": fit.yaw_deg, "ice_mu": params.ice_mu, "grip": params.blade_grip,
                 "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING,
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
-                "skate": rig.MOVE_MS, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
+                "skate": rig.MOVE_MS, "sprint": SPRINT, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
                 "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
-                "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "check": COMFORT_CHECK_MIN,
+                "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "aa": AA, "check": COMFORT_CHECK_MIN,
                 "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
@@ -215,6 +225,7 @@ class Tuning:
         d.move_ms, d.turn_deg_s = v["skate"], v["turn"]
         d.push, d.glide, d.stop_ms2, d.carve = v["push"], v["glide"], v["stop"], v["carve"]
         d.back, d.side = v["back"], v["side"]
+        d.sprint_ms = v.get("sprint", 0.0)
 
     def pick(self, d: int) -> None:
         self.i = (self.i + d) % len(SETTINGS)
@@ -736,7 +747,8 @@ class Stick:
 class Comfort:
     """How the thumbsticks move you, and how you feel about it.
 
-    - rig.csv: every frame, the sticks, the drive's velocity, turn rate and mode, and the vignette.
+    - rig.csv: every frame, the sticks, the drive's velocity, turn rate and mode, the vignette, and
+      the sprint trigger.
     - A queasiness check every `check` minutes of play (the "comfort check" setting; 0 = off): the
       voice asks, and you press A (fine), B (a bit queasy) or Y (I need a break). Logged as 0, 2
       and 5 on the usual 0-10 scale, where 4 is about where nausea becomes notable (Farmani &
@@ -754,14 +766,14 @@ class Comfort:
         self.voice, self.log = voice, log
         self.fh = open(path, "w", newline="") if path is not None else None
         if self.fh is not None:
-            self.fh.write("t,lx,ly,rx,moving,mode,vx,vz,speed,omega,accel,vignette\n")
+            self.fh.write("t,lx,ly,rx,moving,mode,vx,vz,speed,omega,accel,vignette,trigger\n")
         self.asking_since: float | None = None
         self.play_s = 0.0
         self.next_check: float | None = None
         self.ratings: list[dict] = []
         self.prev_v: np.ndarray | None = None
         self.stats = {"frames": 0, "moving_s": 0.0, "accel_events": 0, "over6_s": 0.0, "peak_accel": 0.0,
-                      "peak_turn_deg_s": 0.0, "vignette_s": 0.0}
+                      "peak_turn_deg_s": 0.0, "vignette_s": 0.0, "sprint_s": 0.0, "peak_speed": 0.0}
         self._over2 = False
 
     @property
@@ -784,10 +796,13 @@ class Comfort:
         s["peak_accel"] = max(s["peak_accel"], a)
         s["peak_turn_deg_s"] = max(s["peak_turn_deg_s"], abs(math.degrees(omega)))
         s["vignette_s"] += dt if vignette > 0.1 else 0.0
+        lx, ly, rx, *rest = sticks
+        lt = rest[0] if rest else 0.0
+        s["sprint_s"] += dt if speed > drive.move_ms + 0.05 else 0.0
+        s["peak_speed"] = max(s["peak_speed"], speed)
         if self.fh is not None:
-            lx, ly, rx = sticks
             self.fh.write(f"{t_sim:.3f},{lx:.3f},{ly:.3f},{rx:.3f},{int(moving)},{drive.mode},{vel[0]:.3f},"
-                          f"{vel[2]:.3f},{speed:.3f},{omega:.4f},{a:.2f},{vignette:.2f}\n")
+                          f"{vel[2]:.3f},{speed:.3f},{omega:.4f},{a:.2f},{vignette:.2f},{lt:.2f}\n")
         self.play_s += dt
         if every_min <= 0:
             self.next_check = None
@@ -824,7 +839,8 @@ class Comfort:
         return {"play_min": round(self.play_s / 60, 2), "moving_min": round(s["moving_s"] / 60, 2),
                 "accel_events_per_min": round(s["accel_events"] / mins, 1), "over6_s": round(s["over6_s"], 2),
                 "peak_accel": round(s["peak_accel"], 1), "peak_turn_deg_s": round(s["peak_turn_deg_s"]),
-                "vignette_min": round(s["vignette_s"] / 60, 2), "ratings": self.ratings}
+                "vignette_min": round(s["vignette_s"] / 60, 2), "sprint_min": round(s["sprint_s"] / 60, 2),
+                "peak_speed": round(s["peak_speed"], 2), "ratings": self.ratings}
 
     def close(self) -> None:
         if self.fh is not None:
@@ -1002,7 +1018,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 now = time.time()
                 focused = ctx.session_state == xr.SessionState.FOCUSED
                 inp = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False, "x": False, "y": False,
-                       "lthumb": (0.0, 0.0), "lclick": False}
+                       "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0}
                 if focused:
                     xr.sync_actions(ctx.session, sync_info)
                     inp = inputs.read()
@@ -1059,8 +1075,9 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     elif abs(rx) < 0.35:
                         snap_ready = True
                     rx = 0.0
+                lt = inp.get("ltrigger", 0.0) if moving else 0.0          # the sprint trigger
                 vel, omega = drive.update((lx, ly) if moving else (0.0, 0.0), rx,
-                                          play.head[0] if play.head is not None else None, dt_frame)
+                                          play.head[0] if play.head is not None else None, dt_frame, boost=lt)
                 vel = drive.vel = mode.confine(play.head[1] if play.head is not None else None, vel, dt_frame)
                 play.rig.drive(t_disp * 1e-9, vel, omega, pivot)
                 # the comfort vignette closes in with the thumbsticks' motion (not your own)
@@ -1070,7 +1087,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     want = 1.0
                 tunnel += (want - tunnel) * (1 - np.exp(-dt_frame / (0.08 if want > tunnel else 0.25)))
                 if focused:                                     # play time only (not while the headset sleeps)
-                    comfort.frame(now, sampler.shared.t_now, dt_frame, (lx, ly, rx), moving, drive, vel, omega,
+                    comfort.frame(now, sampler.shared.t_now, dt_frame, (lx, ly, rx, lt), moving, drive, vel, omega,
                                   tunnel * tv["vignette"], tv["check"])
 
                 # ---- tuning and buttons
@@ -1165,10 +1182,13 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 world_to_room = rp.inverse()
                 strength = tunnel * play.tuning.values["vignette"]
                 mesh = record.tunnel_mesh(strength) if strength > 0.02 else None
-                for view in ctx.view_loop(frame_state):
+                renderer.samples = int(play.tuning.values.get("aa", AA))
+                for i, view in enumerate(ctx.view_loop(frame_state)):
                     proj = np.asarray(Matrix4x4f.create_projection_fov(GraphicsAPI.OPENGL, view.fov, 0.05, 100.0).m)
+                    sc = ctx.swapchains[i]
                     renderer.draw(drawn.lines, proj @ record.view_matrix(view.pose) @ world_to_room, theme.SKY,
-                                  tris=drawn.tris)
+                                  tris=drawn.tris, target=ctx.graphics.swapchain_framebuffer,
+                                  viewport=(0, 0, sc.width, sc.height))
                     if mesh is not None:
                         renderer.tunnel(mesh)
                 w = time.perf_counter() - t_work               # this frame's work, not the wait for the headset

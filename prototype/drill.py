@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import glfast  # noqa: F401  (first: PyOpenGL's error checking off, read when xr loads it)
 import numpy as np
 import xr
 

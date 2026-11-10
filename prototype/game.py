@@ -20,7 +20,8 @@ at centre again (you're moved there).
 
 Controls
   grip buttons                  hold the stick (as in the sandbox)
-  left thumbstick               skate (forward is where you look)
+  left thumbstick               skate (forward is where you look), up to your cruising speed
+  left trigger                  sprint: the harder you squeeze, the faster, up to "sprint speed"
   right thumbstick              turn (the "snap turn" setting turns you in steps instead; 0 = smooth)
   A                             drop the puck (a new game when one is over)
   B                             say the score
@@ -49,6 +50,7 @@ import json
 import time
 from pathlib import Path
 
+import glfast  # noqa: F401  (first: PyOpenGL's error checking off, read when xr loads it)
 import numpy as np
 import xr
 
@@ -330,8 +332,8 @@ class FreeSkateMode(GameMode):
 
     def intro(self) -> str:
         who = "a goalie in each net" if self.goalie_ends else "both nets empty"
-        return (f"Free skate. You, a puck, and {who}. Left stick skates, right stick turns. "
-                "X puts a puck on your stick. Click the left stick to tune the settings, A saves them.")
+        return (f"Free skate. You, a puck, and {who}. Left stick skates, left trigger sprints, right "
+                "stick turns. X puts a puck on your stick. Click the left stick to tune the settings, A saves them.")
 
     def place_if_asked(self, t: float, blade_world) -> None:
         if self.want_place is None or self.play.head is None:

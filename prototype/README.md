@@ -112,7 +112,11 @@ Your stick, a puck and a net, laid out in front of you. Play, and tune everythin
 - **Grip buttons:** hold the stick (as above).
 - **Left stick:** move you around the ice (`rig.py`). Forward is where you look; it eases in
   and out, or skates with hockey limits (push, glide, hockey stop, turn limit) if you turn them on
-  (below).
+  (below). Full stick is your cruising speed ("skate speed").
+- **Left trigger (index finger):** sprint. The harder you squeeze, the faster you go, from your
+  cruising speed up to "sprint speed" (default 4.5 m/s; 0 = off). Like a hockey game's speed
+  burst, but how hard you squeeze is how fast. You get there at the push limit, and coast back
+  down at the glide when you let go.
 - **Right stick left/right:** turn you, about your head (not while fitting), smoothly. Set "snap
   turn" (e.g. 30 degrees) to turn in steps instead, one per flick.
 - **Click the left stick (a quick press):** switch the left stick to tuning, and back:

@@ -38,6 +38,7 @@ import winsound
 from ctypes import wintypes
 from pathlib import Path
 
+import glfast  # noqa: F401  (first: PyOpenGL's error checking off, read when xr loads it)
 import numpy as np
 import xr
 from OpenGL import GL
@@ -333,7 +334,7 @@ def _run_protocol(shared: Shared, voice: Voice, phases: list[protocol.Phase]) ->
 
 
 class Inputs:
-    """Grip poses, squeeze (grip button), right thumbstick, A/B, and haptics."""
+    """Grip poses, squeeze (grip button), both thumbsticks, A/B/X/Y, the left trigger, and haptics."""
 
     PROFILE = "/interaction_profiles/oculus/touch_controller"
 
@@ -363,6 +364,7 @@ class Inputs:
         self.y = make("y_button", A.BOOLEAN_INPUT, left)
         self.lthumb = make("left_thumbstick", A.VECTOR2F_INPUT, left)
         self.lclick = make("left_thumbstick_click", A.BOOLEAN_INPUT, left)
+        self.ltrigger = make("left_trigger", A.FLOAT_INPUT, left)
         self.haptic = make("haptic", A.VIBRATION_OUTPUT, both)
         pairs = [(self.pose, "/user/hand/left/input/grip/pose"), (self.pose, "/user/hand/right/input/grip/pose"),
                  (self.squeeze, "/user/hand/left/input/squeeze/value"),
@@ -372,6 +374,7 @@ class Inputs:
                  (self.x, "/user/hand/left/input/x/click"), (self.y, "/user/hand/left/input/y/click"),
                  (self.lthumb, "/user/hand/left/input/thumbstick"),
                  (self.lclick, "/user/hand/left/input/thumbstick/click"),
+                 (self.ltrigger, "/user/hand/left/input/trigger/value"),
                  (self.haptic, "/user/hand/left/output/haptic"), (self.haptic, "/user/hand/right/output/haptic")]
         bindings = (xr.ActionSuggestedBinding * len(pairs))(
             *[xr.ActionSuggestedBinding(act, xr.string_to_path(inst, path)) for act, path in pairs])
@@ -393,7 +396,7 @@ class Inputs:
     def read(self) -> dict:
         s = self.ctx.session
         out = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False,
-               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False}
+               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0}
         try:
             for d in ("l", "r"):
                 st = xr.get_action_state_float(s, self._info(self.squeeze, d))
@@ -407,6 +410,8 @@ class Inputs:
             v = xr.get_action_state_vector2f(s, self._info(self.lthumb, "l"))
             out["lthumb"] = (v.current_state.x, v.current_state.y) if v.is_active else (0.0, 0.0)
             out["lclick"] = bool(xr.get_action_state_boolean(s, self._info(self.lclick, "l")).current_state)
+            st = xr.get_action_state_float(s, self._info(self.ltrigger, "l"))
+            out["ltrigger"] = float(st.current_state) if st.is_active else 0.0
         except xr.XrException:
             pass
         return out
@@ -582,11 +587,17 @@ class LineRenderer:
         GL.glDisable(GL.GL_BLEND)
         GL.glEnable(GL.GL_DEPTH_TEST)
 
-    def draw(self, verts: np.ndarray, mvp: np.ndarray, clear, tris: np.ndarray | None = None) -> None:
-        """Clear, then the triangles (solid surfaces), then the lines, into the bound framebuffer's
-        viewport (by way of the multisampled one, resolved into it at the end)."""
-        target = int(GL.glGetIntegerv(GL.GL_DRAW_FRAMEBUFFER_BINDING))
-        x, y, w, h = (int(v) for v in GL.glGetIntegerv(GL.GL_VIEWPORT))
+    def draw(self, verts: np.ndarray, mvp: np.ndarray, clear, tris: np.ndarray | None = None,
+             target: int | None = None, viewport: tuple[int, int, int, int] | None = None) -> None:
+        """Clear, then the triangles (solid surfaces), then the lines, into the target framebuffer's
+        viewport (by way of the multisampled one, resolved into it at the end). Pass target and
+        viewport when they're known (the headset's): asking GL for them makes the CPU wait for the
+        driver; left out, they're the bound framebuffer and the current viewport."""
+        if target is None:
+            target = int(GL.glGetIntegerv(GL.GL_DRAW_FRAMEBUFFER_BINDING))
+        if viewport is None:
+            viewport = tuple(int(v) for v in GL.glGetIntegerv(GL.GL_VIEWPORT))
+        x, y, w, h = viewport
         ms = self._multisampled(w, h)
         if ms is not None:
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, ms)
