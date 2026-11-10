@@ -33,12 +33,13 @@ def test_the_check_asks_and_a_b_x_answer_it(tmp_path):
             c.frame(now, now, dt, (0.0, 1.0, 0.0), True, d, np.array([3.0, 0.0, 0.0]), 0.0, 0.5, 1.0)
     play(61)                                            # a minute of play, with a check every minute
     assert c.asking and "Press A if you feel fine" in voice.said[-1]
-    assert not c.answer("y", now, 1.0) and c.asking     # Y isn't an answer
+    assert "Y if you need a break" in voice.said[-1]
     assert c.answer("a", now, 1.0) and not c.asking
     assert c.ratings[-1]["answer"] == "fine" and c.ratings[-1]["rating"] == 0
     assert not c.answer("a", now, 1.0)                  # not asking: A does its usual job
     play(61)
-    assert c.answer("x", now, 1.0)
+    assert not c.answer("x", now, 1.0) and c.asking   # X is a new puck, never an answer
+    assert c.answer("y", now, 1.0)
     assert c.ratings[-1]["rating"] >= 4 and "take the headset off" in voice.said[-1]
     assert ("comfort", {"answer": "need a break", "rating": 5}) in log.events
     c.close()
@@ -114,7 +115,8 @@ def test_the_defaults_skate_as_before_and_the_puck_as_the_research_says():
     spec = stickspec.from_height(1.73, "left")
     values = sandbox.Tuning.defaults(spec, grab.Fit(), pk.Params())
     assert values["push"] == sandbox.PUSH > 0                   # on: the old easing made Jon sick in seconds
-    assert all(values[k] == 0 for k in ("glide", "stop", "carve"))
+    assert values["glide"] == sandbox.GLIDE > 0 and values["stop"] == sandbox.STOP > 0   # both felt good
+    assert values["carve"] == 0
     assert values["back"] == values["side"] == 1.0
     p = pk.Params()
     assert (p.ice_mu, p.board_bounce, p.ice_bounce, p.air_k, p.soft_hands) == (0.085, 0.30, 0.20, 0.0043, 0.0)

@@ -155,7 +155,7 @@ synthesis): what would make the puck, the skating and the turning feel like hock
   - the AI's and the drills' puck predictions include the drag.
 - **The skating, built as settings, off by default, to try one at a time:** a bounded push, a
   glide, a hockey stop, a turn limit at speed, and slower backward and sideways skating. A comfort
-  check (A fine, B a bit queasy, X a break) and a per-frame log of the thumbsticks' motion come
+  check (A fine, B a bit queasy, Y a break) and a per-frame log of the thumbsticks' motion come
   with them. The old easing starts and ends every move at about 2 g. In the first A/B, the push
   limit (6 m/s²) felt solid, and turning it off brought the motion sickness back within seconds,
   so push is now on by default.

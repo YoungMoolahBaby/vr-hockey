@@ -150,7 +150,8 @@ keys are those in `sandbox_settings.json`):
 - blade grip, buzz strength
 - skate speed (default 3 m/s), snap turn (default 0 = smooth; 30 turns in 30-degree steps) and smooth turn speed
   (default 150 deg/s): the thumbsticks, everywhere
-- **The skating model** (`rig.Drive`): push is on (6 m/s²); the other limits are off by default.
+- **The skating model** (`rig.Drive`): push (6 m/s²), glide (1.5) and the hockey stop (8) are on;
+  the others are off by default.
   Try them one at a time, in this order, with the comfort check on:
   - push (`push`, m/s²): speed up at most this hard, easing in at the top, half as hard
     backwards; with no glide, letting go slows you at this rate too. 6 is a rec skater's first
@@ -160,10 +161,10 @@ keys are those in `sandbox_settings.json`):
     6-10 never went over 11 m/s² (5% of the time over 6); off, the worst 5% were over 30 and
     the peak was 47.
   - glide (`glide`, m/s²): let go of the stick, or ease off it, and you coast, slowing at this
-    rate. Try 1.5 (2 s and 3 m from 3 m/s), then 1.0, then 0.5 on later days. Off, letting go
-    stops you within half a metre. In the rink, the boards stop a glide gently.
+    rate. 1.5 (2 s and 3 m from 3 m/s) "felt good"; try 1.0, then 0.5 on later days. Off, letting
+    go stops you at the push rate. In the rink, the boards stop a glide gently.
   - hockey stop (`stop`, m/s²): hold the left stick more than 120° against your motion to stop
-    at this rate, then push the new way. Try 8, or 6 to be gentler. The vignette stays closed
+    at this rate, then push the new way. 8 "felt good" (6 is gentler). The vignette stays closed
     through it.
   - turn limit (`carve`, m/s²): your path can't bend harder than this sideways. A glance doesn't
     whip it round, the right stick's turn is capped at speed (115°/s at 3 m/s for 6), and turning
@@ -171,7 +172,8 @@ keys are those in `sandbox_settings.json`):
   - backward and sideways speed (`back`, `side`): a share of forwards. Try 0.8 and 0.5.
 - comfort vignette (default 0.7): the view's edges darken while the thumbsticks move you (0 = off)
 - comfort check (`check`, default every 4 min; 0 = off): the voice asks how you feel. Press A if
-  you feel fine, B if you're a bit queasy, X if you need a break (X says to take the headset off).
+  you feel fine, B if you're a bit queasy, Y if you need a break (Y says to take the headset off;
+  not X, which is a new puck).
   They're logged as 0, 2 and 5 out of 10. A 0-10 count on the left stick was tried first and was
   too fiddly to answer in the headset. Every frame of the thumbsticks' motion goes to `rig.csv`,
   and a summary to `meta.json` (`comfort`).

@@ -74,6 +74,9 @@ VIGNETTE = 0.7           # comfort: the view's edges darken while the thumbstick
 PUSH = 6.0               # m/s^2: the skating push limit (rig.Drive.push), the research's pick. ON: with it off
                          # (the old easing, 20-47 m/s^2 jolts) Jon got sick within seconds; 6 "was solid", and
                          # 6-10 felt fine at 3 and 4 m/s (free skate 2026-11-09). 0 = the old easing
+GLIDE = 1.5              # m/s^2: let go and you coast, slowing at this (rig.Drive.glide): 2 s and 3 m from 3 m/s.
+STOP = 8.0               # m/s^2: the hockey stop, the left stick held against your motion (rig.Drive.stop_ms2).
+                         # Both "felt good" (free skate 2026-11-09, with push 6); 0 = off
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
@@ -167,7 +170,7 @@ class Tuning:
                 "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING,
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
-                "push": PUSH, "glide": 0.0, "stop": 0.0, "carve": 0.0, "back": 1.0, "side": 1.0,
+                "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": 0.0, "back": 1.0, "side": 1.0,
                 "snap": SNAP_DEG, "vignette": VIGNETTE, "check": COMFORT_CHECK_MIN, "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
@@ -700,15 +703,16 @@ class Comfort:
 
     - rig.csv: every frame, the sticks, the drive's velocity, turn rate and mode, and the vignette.
     - A queasiness check every `check` minutes of play (the "comfort check" setting; 0 = off): the
-      voice asks, and you press A (fine), B (a bit queasy) or X (I need a break). Logged as 0, 2
+      voice asks, and you press A (fine), B (a bit queasy) or Y (I need a break). Logged as 0, 2
       and 5 on the usual 0-10 scale, where 4 is about where nausea becomes notable (Farmani &
-      Teather 2020): X says to take the headset off. (A 0-10 count on the left stick was too fiddly
+      Teather 2020): Y says to take the headset off. Not X: X is a new puck, pressed all the time
+      (a puck grabbed while it was asking counted as a break). (A 0-10 count on the left stick was too fiddly
       in the headset: Jon couldn't tell how to answer.) Tune skating one change at a time against
       these answers.
     - summary(): for meta.json (time moving, hard accelerations, turn rates, the ratings)."""
 
     TIMEOUT = 30.0
-    ANSWERS = {"a": ("fine", 0), "b": ("a bit queasy", 2), "x": ("need a break", 5)}
+    ANSWERS = {"a": ("fine", 0), "b": ("a bit queasy", 2), "y": ("need a break", 5)}
     HARD = (2.0, 6.0)                 # m/s^2: accelerations counted (events above 2, time above 6)
 
     def __init__(self, path: Path | None, voice, log):
@@ -757,7 +761,7 @@ class Comfort:
             self.next_check = self.play_s + every_min * 60
         if not self.asking and self.play_s >= self.next_check:
             self.asking_since = now
-            self.voice.say("Comfort check. Press A if you feel fine, B if you're a bit queasy, X if you need a break.",
+            self.voice.say("Comfort check. Press A if you feel fine, B if you're a bit queasy, Y if you need a break.",
                            key="comfort")
         if self.asking and now - self.asking_since > self.TIMEOUT:
             self.asking_since = None
@@ -765,7 +769,7 @@ class Comfort:
             self.log.event(t_sim, "comfort", answer=None, rating=None)
 
     def answer(self, button: str, t_sim: float, every_min: float) -> bool:
-        """A, B or X while asking: the answer (True: the button was the answer, not its usual job)."""
+        """A, B or Y while asking: the answer (True: the button was the answer, not its usual job)."""
         if not self.asking or button not in self.ANSWERS:
             return False
         word, r = self.ANSWERS[button]
@@ -775,7 +779,7 @@ class Comfort:
                              "rating": r})
         self.log.event(t_sim, "comfort", answer=word, rating=r)
         print(f"  comfort: {word} ({r}/10) after {self.play_s / 60:.1f} min", flush=True)
-        self.voice.say("Take a break: take the headset off." if button == "x" else
+        self.voice.say("Take a break: take the headset off." if button == "y" else
                        "Thanks. Tell Claude what feels off." if button == "b" else "Thanks.", key="comfort")
         return True
 
@@ -1051,7 +1055,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 if not announced and now - last_change > 0.5:
                     voice.say(tu.describe(), key="setting")
                     announced = True
-                if inp["y"] and not prev["y"]:
+                answered = False
+                for b in ("a", "b", "y"):                      # the comfort check's answer, if it's asking
+                    if inp[b] and not prev[b] and comfort.answer(b, sampler.shared.t_now, tv["check"]):
+                        answered = True
+                if inp["y"] and not prev["y"] and not answered:
                     play.fitting = not play.fitting
                     voice.say("Stick fitting. Right stick turns and tilts it. Hold B and push to swing it. "
                               "A saves." if play.fitting else "Fitting off, not saved.", key="fit")
@@ -1060,11 +1068,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     if new_fit != play.fit:
                         tu.values.update(roll=new_fit.roll_deg, pitch=new_fit.pitch_deg, yaw=new_fit.yaw_deg)
                         play.retune()
-                answered = False
-                for b in ("a", "b", "x"):                      # the comfort check's answer, if it's asking
-                    if inp[b] and not prev[b] and comfort.answer(b, sampler.shared.t_now, tv["check"]):
-                        answered = True
-                if inp["x"] and not prev["x"] and not answered:
+                if inp["x"] and not prev["x"]:
                     mode.button("x", sampler.shared.t_now)
                 # the left stick's click, only with the stick centred (pushing it hard clicks it too):
                 # a quick press switches it between moving you and tuning; a 1 s press recenters
