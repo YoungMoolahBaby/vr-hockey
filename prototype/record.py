@@ -490,7 +490,12 @@ def _compile(src, kind):
 
 
 class LineRenderer:
-    def __init__(self):
+    """Solid triangles, then lines over them, into a 4x multisampled buffer that's resolved into the
+    target (anti-aliased: thin lines and white edges against the dark shimmer less as you move)."""
+
+    def __init__(self, samples: int = 4):
+        self.samples = samples
+        self._msaa = None                                # (width, height, framebuffer, renderbuffers)
         self.prog = GL.glCreateProgram()
         for src, kind in ((VS, GL.GL_VERTEX_SHADER), (FS, GL.GL_FRAGMENT_SHADER)):
             GL.glAttachShader(self.prog, _compile(src, kind))
@@ -498,16 +503,10 @@ class LineRenderer:
         if not GL.glGetProgramiv(self.prog, GL.GL_LINK_STATUS):
             raise RuntimeError(GL.glGetProgramInfoLog(self.prog).decode())
         self.mvp_loc = GL.glGetUniformLocation(self.prog, "mvp")
-        self.vao = GL.glGenVertexArrays(1)
-        self.vbo = GL.glGenBuffers(1)
-        GL.glBindVertexArray(self.vao)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
-        GL.glEnableVertexAttribArray(0)
-        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 24, ctypes.c_void_p(0))
-        GL.glEnableVertexAttribArray(1)
-        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 24, ctypes.c_void_p(12))
-        GL.glBindVertexArray(0)
+        self.vao, self.vbo = self._buffers()
+        self.tri_vao, self.tri_vbo = self._buffers()
         self._uploaded = None
+        self._tris = None
         # the comfort vignette: its own little program, drawn over each eye's view
         self.tprog = GL.glCreateProgram()
         for src, kind in ((TUNNEL_VS, GL.GL_VERTEX_SHADER), (TUNNEL_FS, GL.GL_FRAGMENT_SHADER)):
@@ -523,6 +522,48 @@ class LineRenderer:
         GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 12, ctypes.c_void_p(0))
         GL.glBindVertexArray(0)
         self._tunnel = None
+
+    @staticmethod
+    def _buffers():
+        """A vertex array and its buffer: rows of x, y, z, r, g, b."""
+        vao, vbo = GL.glGenVertexArrays(1), GL.glGenBuffers(1)
+        GL.glBindVertexArray(vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 24, ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(1)
+        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 24, ctypes.c_void_p(12))
+        GL.glBindVertexArray(0)
+        return vao, vbo
+
+    def _multisampled(self, w: int, h: int):
+        """Our multisampled framebuffer at this size, or None (then draw straight into the target)."""
+        if self.samples < 2:
+            return None
+        if self._msaa is not None and self._msaa[:2] == (w, h):
+            return self._msaa[2]
+        if self._msaa is not None:
+            GL.glDeleteFramebuffers(1, [self._msaa[2]])
+            GL.glDeleteRenderbuffers(2, list(self._msaa[3]))
+            self._msaa = None
+        n = min(self.samples, int(GL.glGetIntegerv(GL.GL_MAX_SAMPLES)))
+        fbo = GL.glGenFramebuffers(1)
+        rbs = GL.glGenRenderbuffers(2)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fbo)
+        for rb, fmt, at in zip(rbs, (GL.GL_RGBA8, GL.GL_DEPTH_COMPONENT24),
+                               (GL.GL_COLOR_ATTACHMENT0, GL.GL_DEPTH_ATTACHMENT)):
+            GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, rb)
+            GL.glRenderbufferStorageMultisample(GL.GL_RENDERBUFFER, n, fmt, w, h)
+            GL.glFramebufferRenderbuffer(GL.GL_FRAMEBUFFER, at, GL.GL_RENDERBUFFER, rb)
+        GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, 0)
+        if GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER) != GL.GL_FRAMEBUFFER_COMPLETE:
+            print(f"  multisampling unavailable ({n}x at {w}x{h}): drawing without it", flush=True)
+            GL.glDeleteFramebuffers(1, [fbo])
+            GL.glDeleteRenderbuffers(2, list(rbs))
+            self.samples = 0
+            return None
+        self._msaa = (w, h, fbo, tuple(rbs))
+        return fbo
 
     def tunnel(self, mesh: np.ndarray) -> None:
         """Draw the vignette over what's drawn (after draw(), in the same view)."""
@@ -541,21 +582,42 @@ class LineRenderer:
         GL.glDisable(GL.GL_BLEND)
         GL.glEnable(GL.GL_DEPTH_TEST)
 
-    def draw(self, verts: np.ndarray, mvp: np.ndarray, clear) -> None:
+    def draw(self, verts: np.ndarray, mvp: np.ndarray, clear, tris: np.ndarray | None = None) -> None:
+        """Clear, then the triangles (solid surfaces), then the lines, into the bound framebuffer's
+        viewport (by way of the multisampled one, resolved into it at the end)."""
+        target = int(GL.glGetIntegerv(GL.GL_DRAW_FRAMEBUFFER_BINDING))
+        x, y, w, h = (int(v) for v in GL.glGetIntegerv(GL.GL_VIEWPORT))
+        ms = self._multisampled(w, h)
+        if ms is not None:
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, ms)
+            GL.glViewport(0, 0, w, h)
         GL.glClearColor(*clear, 1.0)
         GL.glClearDepth(1.0)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glUseProgram(self.prog)
         GL.glUniformMatrix4fv(self.mvp_loc, 1, GL.GL_TRUE, np.ascontiguousarray(mvp, dtype=np.float32))
+        if tris is not None and len(tris):
+            GL.glBindVertexArray(self.tri_vao)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.tri_vbo)
+            if tris is not self._tris:                   # the same frame's second eye: already there
+                GL.glBufferData(GL.GL_ARRAY_BUFFER, tris.nbytes, tris, GL.GL_DYNAMIC_DRAW)
+                self._tris = tris
+            GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(tris))
         GL.glBindVertexArray(self.vao)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
-        if verts is not self._uploaded:                  # the same frame's second eye: already there
+        if verts is not self._uploaded:
             GL.glBufferData(GL.GL_ARRAY_BUFFER, verts.nbytes, verts, GL.GL_DYNAMIC_DRAW)
             self._uploaded = verts
         GL.glDrawArrays(GL.GL_LINES, 0, len(verts))
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
+        if ms is not None:                               # resolve into the target, and draw on there again
+            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, ms)
+            GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, target)
+            GL.glBlitFramebuffer(0, 0, w, h, x, y, x + w, y + h, GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST)
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, target)
+            GL.glViewport(x, y, w, h)
 
 
 def scene(active: bool, spec: stickspec.StickSpec, poses: dict, held: dict, stick, state: int) -> np.ndarray:

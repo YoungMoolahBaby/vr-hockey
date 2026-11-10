@@ -49,6 +49,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import xr
@@ -63,6 +64,7 @@ import record
 import rig
 import stickmath
 import stickspec
+import theme
 import audio
 from contacts import Bus, Contact
 from stickspec import INCH
@@ -71,6 +73,8 @@ HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = HERE / "sandbox_settings.json"
 SNAP_DEG = 0.0           # smooth turning (Jon's pick); 30 turns you in steps, the comfort option
 VIGNETTE = 0.7           # comfort: the view's edges darken while the thumbsticks move you (0 = off)
+GRID = 0.0               # the 2 m ice grid: off (a real rink has none; its lines sliding by under you are
+                         # motion your inner ear doesn't feel). 1 = on (the "ice grid" setting)
 PUSH = 6.0               # m/s^2: the skating push limit (rig.Drive.push), the research's pick. ON: with it off
                          # (the old easing, 20-47 m/s^2 jolts) Jon got sick within seconds; 6 "was solid", and
                          # 6-10 felt fine at 3 and 4 m/s (free skate 2026-11-09). 0 = the old easing
@@ -134,6 +138,7 @@ SETTINGS = (
     Setting("snap", "snap turn", 15, 0, 90, "{:.0f} degrees"),
     Setting("turn", "smooth turn speed", 15, 45, 360, "{:.0f} degrees per second"),
     Setting("vignette", "comfort vignette", 0.1, 0.0, 1.0, "{:.1f}"),
+    Setting("grid", "ice grid", 1, 0, 1, "on", "off"),
     Setting("check", "comfort check", 1, 0, 15, "every {:g} minutes", "off"),   # a 0-10 queasiness check
     Setting("ice", "ice assist", 2, 0, 30, "{:.0f} centimetres"),      # last: one push left from the first
 )
@@ -174,7 +179,8 @@ class Tuning:
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
                 "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
-                "snap": SNAP_DEG, "vignette": VIGNETTE, "check": COMFORT_CHECK_MIN, "ice": pk.ICE_ASSIST * 100}
+                "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "check": COMFORT_CHECK_MIN,
+                "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
         v = self.values
@@ -548,16 +554,37 @@ class Physics:
 # ----------------------------------------------------------------------------- drawing
 
 
-WHITE, RED, BLUE = (0.92, 0.92, 0.92), (0.95, 0.2, 0.2), (0.3, 0.5, 1.0)
+WHITE, RED, BLUE = (0.92, 0.92, 0.92), theme.RED, theme.BLUE
+
+
+class Frame(NamedTuple):
+    """What a mode draws: solid triangles (drawn first) and line segments, each row x, y, z, r, g, b."""
+    tris: np.ndarray
+    lines: np.ndarray
+
+
+NO_TRIS = np.zeros((0, 6), dtype=np.float32)
 
 
 class Lines:
     """Line segments for the renderer: line(a, b, colour) one at a time, or many(A, B, colour)
-    for whole arrays of them (much cheaper in Python); then .array()."""
+    for whole arrays of them (much cheaper in Python); then .array(). And solid triangles:
+    solid(P, colour), then .tri_array()."""
 
     def __init__(self):
         self.v: list = []
         self.blocks: list[np.ndarray] = []
+        self.tris: list[np.ndarray] = []
+
+    def solid(self, P, c) -> None:
+        """Triangles: corners P (3n, 3), one colour (3,) or one per corner (3n, 3)."""
+        P = np.asarray(P, dtype=np.float32).reshape(-1, 3)
+        out = np.empty((len(P), 6), dtype=np.float32)
+        out[:, :3], out[:, 3:] = P, c
+        self.tris.append(out)
+
+    def tri_array(self) -> np.ndarray:
+        return np.vstack(self.tris) if self.tris else NO_TRIS
 
     def __call__(self, a, b, c) -> None:
         self.v.append((*a, *c))
@@ -576,42 +603,43 @@ class Lines:
         return np.vstack(parts) if len(parts) > 1 else parts[0]
 
 
-def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int) -> Frame:
     line = Lines()
-    draw_rink(line, rink)
+    draw_rink(line, rink, grid=play.tuning.values.get("grid", 0) > 0)
     draw_puck(line, play.sim.puck)
     draw_hands_and_stick(line, play, poses, held, stick, state)
-    return line.array()
+    return Frame(line.tri_array(), line.array())
 
 
-def draw_rink(line, rink: pk.Rink) -> None:
+def draw_rink(line, rink: pk.Rink, grid: bool = False) -> None:
     def W(u, y, w):
         return rink.to_world(u, y, w)
 
     end_w = rink.goal_dist + pk.GOAL_DEPTH + rink.end
-    grid = (0.32, 0.36, 0.44)
-    for u in np.arange(-rink.half_width, rink.half_width + 0.01, 0.5):     # the ice
-        line(W(u, 0, -rink.back), W(u, 0, end_w), grid)
-    for w in np.arange(-rink.back, end_w + 0.01, 0.5):
-        line(W(-rink.half_width, 0, w), W(rink.half_width, 0, w), grid)
-    boards = (0.55, 0.55, 0.6)
-    corners = [(-rink.half_width, -rink.back), (rink.half_width, -rink.back),
-               (rink.half_width, end_w), (-rink.half_width, end_w)]
-    for (u0, w0), (u1, w1) in zip(corners, corners[1:] + corners[:1]):
-        line(W(u0, 1.0, w0), W(u1, 1.0, w1), boards)
-    for u0, w0 in corners:
-        line(W(u0, 0, w0), W(u0, 1.0, w0), boards)
-    # the goal: line, crease, posts, crossbar, net
+    hw_ice = rink.half_width
+    corners = [(-hw_ice, -rink.back), (hw_ice, -rink.back), (hw_ice, end_w), (-hw_ice, end_w)]
     g, hw, gh, d = rink.goal_dist, pk.GOAL_HALF_W, pk.GOAL_H, pk.GOAL_DEPTH
-    line(W(-rink.half_width, 0.002, g), W(rink.half_width, 0.002, g), RED)
+    s = theme.Surf(line.solid, rink.origin, rink.right, rink.fwd)    # the ice, the boards, the paint
+    theme.ice(s, corners)
+    theme.boards(s, corners, 1.0)
+    theme.board_lines(line, W, corners + corners[:1], 1.0)
+    s.band((-hw_ice, g), (hw_ice, g), theme.THIN, theme.PAINT_Y, RED)
+    s.disc((0.0, g), 1.83, theme.PAINT_Y, theme.CREASE, np.pi, 2 * np.pi)
+    if grid:
+        for u in np.arange(-hw_ice, hw_ice + 0.01, 0.5):
+            line(W(u, 0.001, -rink.back), W(u, 0.001, end_w), theme.GRID)
+        for w in np.arange(-rink.back, end_w + 0.01, 0.5):
+            line(W(-hw_ice, 0.001, w), W(hw_ice, 0.001, w), theme.GRID)
+    # the goal: line, crease, posts, crossbar, net
+    line(W(-hw_ice, 0.002, g), W(hw_ice, 0.002, g), RED)
     a = np.linspace(0, np.pi, 17)
     crease = [W(1.83 * np.cos(x), 0.002, g - 1.83 * np.sin(x)) for x in a]
     for p0, p1 in zip(crease, crease[1:]):
-        line(p0, p1, BLUE)
+        line(p0, p1, RED)
     for su in (-hw, hw):
         line(W(su, 0, g), W(su, gh, g), RED)
     line(W(-hw, gh, g), W(hw, gh, g), RED)
-    mesh = (0.75, 0.75, 0.78)
+    mesh = theme.MESH
     for su in (-hw, hw):
         line(W(su, 0, g + d), W(su, gh * 0.6, g + d), mesh)
         line(W(su, gh, g), W(su, gh * 0.6, g + d), mesh)
@@ -624,15 +652,19 @@ def draw_rink(line, rink: pk.Rink) -> None:
 
 
 def draw_puck(line, puck) -> None:
+    """A black puck (solid, a touch inside its rims) with grey rims."""
     P = puck.pos
+    solid = getattr(line, "solid", None)
+    if solid is not None:
+        solid(theme.puck(P, pk.R * 0.97, pk.H * 0.94), theme.PUCK)
     ang = np.linspace(0, 2 * np.pi, 17)
     ring = np.stack([np.cos(ang), np.zeros_like(ang), np.sin(ang)], axis=1) * pk.R
     for y in (P[1] - pk.H / 2, P[1] + pk.H / 2):
         pts = ring + np.array([P[0], y, P[2]])
         for p0, p1 in zip(pts, pts[1:]):
-            line(p0, p1, WHITE)
+            line(p0, p1, theme.PUCK_EDGE)
     for k in range(0, 16, 4):
-        line(ring[k] + P - [0, pk.H / 2, 0], ring[k] + P + [0, pk.H / 2, 0], WHITE)
+        line(ring[k] + P - [0, pk.H / 2, 0], ring[k] + P + [0, pk.H / 2, 0], theme.PUCK_EDGE)
 
 
 def draw_hands_and_stick(line, play: Play, poses: dict, held: dict, stick, state: int) -> None:
@@ -649,8 +681,8 @@ def draw_hands_and_stick(line, play: Play, poses: dict, held: dict, stick, state
     if R is not None:
         spec = play.spec
         loose = state in (grab.LOOSE_TOP, grab.LOOSE_BOTTOM)
-        shaft_c = (0.6, 0.66, 0.75) if loose else WHITE
-        blade_c = (0.8, 0.65, 0.2) if loose else (1.0, 0.85, 0.1)
+        shaft_c = theme.SHAFT_LOOSE if loose else theme.SHAFT
+        blade_c = theme.BLADE_LOOSE if loose else theme.BLADE
         bend = play.sim.bend
         # the ice assist, as the physics does it: the stick tilts down onto the ice (the shaft stays
         # straight: the drop grows along it from the top hand)
@@ -847,7 +879,7 @@ class SandboxMode:
         """The thumbsticks' velocity, allowed where you are (the sandbox: anywhere)."""
         return vel
 
-    def draw(self, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+    def draw(self, poses: dict, held: dict, stick, state: int) -> Frame:
         return scene(self.play, self.play.sim.puck.rink, poses, held, stick, state)
 
     def status(self) -> str:
@@ -1129,13 +1161,14 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     inputs.buzz(h, amp, ms)
 
                 held = {top: dgrab.on["t"], bot: dgrab.on["b"]}
-                verts = mode.draw(poses, held, (R, p), state)
+                drawn = mode.draw(poses, held, (R, p), state)
                 world_to_room = rp.inverse()
                 strength = tunnel * play.tuning.values["vignette"]
                 mesh = record.tunnel_mesh(strength) if strength > 0.02 else None
                 for view in ctx.view_loop(frame_state):
                     proj = np.asarray(Matrix4x4f.create_projection_fov(GraphicsAPI.OPENGL, view.fov, 0.05, 100.0).m)
-                    renderer.draw(verts, proj @ record.view_matrix(view.pose) @ world_to_room, (0.05, 0.06, 0.09))
+                    renderer.draw(drawn.lines, proj @ record.view_matrix(view.pose) @ world_to_room, theme.SKY,
+                                  tris=drawn.tris)
                     if mesh is not None:
                         renderer.tunnel(mesh)
                 w = time.perf_counter() - t_work               # this frame's work, not the wait for the headset

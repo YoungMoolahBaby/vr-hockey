@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 import puck as pk
+import theme
 
 FT = 0.3048
 WIDTH = 85 * FT              # 25.9 m
@@ -197,42 +198,60 @@ def outline(n: int = 12) -> list[tuple[float, float]]:
     return pts
 
 
-RED, BLUE, BOARDS, ICE, MESH = (0.95, 0.2, 0.2), (0.3, 0.5, 1.0), (0.6, 0.62, 0.68), (0.26, 0.29, 0.36), (0.8, 0.8, 0.82)
+RED, BLUE, BOARDS, ICE, MESH = theme.RED, theme.BLUE, (0.6, 0.62, 0.68), theme.GRID, theme.MESH
+RED_LINE_Z = 100 * FT          # centre ice (regulation): the drills' ice runs on to here
 
 
-def markings(zone: Zone, line, near: tuple[float, float] | None = None) -> None:
-    """Draw the zone: boards (bottom and top rail), ice grid, goal line, net, crease, circles,
-    blue line. near: a zone (x, z) spot that gets a finer grid (where the player stands)."""
+def markings(zone: Zone, line, near: tuple[float, float] | None = None, grid: bool = False) -> None:
+    """Draw the zone: solid ice and boards (theme.py) on to the red line, if line takes triangles
+    (line.solid); the boards' edges, goal line, net, crease, circles and blue line as lines; the ice
+    grid if grid is on. near: a zone (x, z) spot that gets a finer grid (where the player stands)."""
     half = WIDTH / 2
     W = zone.to_world
-    pts = outline()
-    for y in (0.0, BOARDS_H):
-        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
-            line(W(x0, y, z0), W(x1, y, z1), BOARDS)
-    for x, z in pts[::3] + [pts[-1]]:
-        line(W(x, 0, z), W(x, BOARDS_H, z), BOARDS)
-    for gx in np.arange(-12, 12.1, 2.0):                             # ice grid, every 2 m
-        line(W(gx, 0, end_boards_z(gx)), W(gx, 0, BLUE_Z), ICE)
-    for gz in np.arange(2.0, BLUE_Z, 2.0):
-        k = side_boards_x(gz)
-        line(W(-k, 0, gz), W(k, 0, gz), ICE)
-    if near is not None:                                             # a finer grid around the player
+    end = RED_LINE_Z + 1.0
+    rim = [(half, end)] + outline() + [(-half, end)]                 # the boards, from the red line round
+    solid = getattr(line, "solid", None)
+    if solid is not None:
+        s = theme.Surf(solid, zone.origin, zone.X, zone.Z)
+        theme.ice(s, rim)
+        theme.boards(s, rim, BOARDS_H, closed=False)
+        theme.mothership(s, rim)
+        P, gl = theme.PAINT_Y, side_boards_x(GOAL_Z)
+        s.band((-gl, GOAL_Z), (gl, GOAL_Z), theme.THIN, P, RED)
+        s.band((-half, BLUE_Z + 0.15), (half, BLUE_Z + 0.15), theme.WIDE, P, BLUE)
+        s.band((-half, RED_LINE_Z), (half, RED_LINE_Z), theme.WIDE, P, RED)
+        s.band((-half, end - 0.3), (half, end - 0.3), 0.08, P, theme.GLOW)    # where the ice ends
+        s.disc((0.0, GOAL_Z), CREASE_R, P, theme.CREASE, 0.0, np.pi)
+        for sx in (-CIRCLE_X, CIRCLE_X):
+            s.arc((sx, CIRCLE_Z), CIRCLE_R, theme.THIN, P, RED)
+            s.disc((sx, CIRCLE_Z), 0.3, P, RED)
+    theme.board_lines(line, W, rim, BOARDS_H)
+    if grid:
+        for gx in np.arange(-12, 12.1, 2.0):                         # ice grid, every 2 m
+            line(W(gx, 0.001, end_boards_z(gx)), W(gx, 0.001, BLUE_Z), ICE)
+        for gz in np.arange(2.0, BLUE_Z, 2.0):
+            k = side_boards_x(gz)
+            line(W(-k, 0.001, gz), W(k, 0.001, gz), ICE)
+    if grid and near is not None:                                    # a finer grid around the player
         nx, nz = near
         for gx in np.arange(np.floor(nx) - 3, np.floor(nx) + 3.01, 0.5):
             z0 = max(end_boards_z(gx), nz - 3)
             if z0 < nz + 3:
-                line(W(gx, 0.001, z0), W(gx, 0.001, nz + 3), ICE)
+                line(W(gx, 0.0015, z0), W(gx, 0.0015, nz + 3), ICE)
         for gz in np.arange(max(np.floor(nz) - 3, 0.5), np.floor(nz) + 3.01, 0.5):
             k = side_boards_x(gz)
-            line(W(max(nx - 3, -k), 0.001, gz), W(min(nx + 3, k), 0.001, gz), ICE)
-    gl = side_boards_x(GOAL_Z)                                       # goal line, blue line
+            line(W(max(nx - 3, -k), 0.0015, gz), W(min(nx + 3, k), 0.0015, gz), ICE)
+    gl = side_boards_x(GOAL_Z)                                       # goal line, blue line, red line
     line(W(-gl, 0.003, GOAL_Z), W(gl, 0.003, GOAL_Z), RED)
     for dz in (0.0, 0.3):
         line(W(-half, 0.003, BLUE_Z + dz), W(half, 0.003, BLUE_Z + dz), BLUE)
+    for dz in (-0.15, 0.15):
+        line(W(-half, 0.003, RED_LINE_Z + dz), W(half, 0.003, RED_LINE_Z + dz), RED)
+    line(W(-half, 0.003, end - 0.3), W(half, 0.003, end - 0.3), theme.GLOW)
     a = np.linspace(0, np.pi, 15)                                    # crease
     cr = [W(CREASE_R * np.cos(t), 0.003, GOAL_Z + CREASE_R * np.sin(t)) for t in a]
     for p0, p1 in zip(cr, cr[1:]):
-        line(p0, p1, BLUE)
+        line(p0, p1, RED)
     net(zone, line)
     a = np.linspace(0, 2 * np.pi, 33)                                # face-off circles and dots
     for sx in (-CIRCLE_X, CIRCLE_X):

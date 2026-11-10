@@ -11,7 +11,9 @@ import functools
 
 import numpy as np
 
-US, THEM, YOU = (0.25, 0.85, 1.0), (1.0, 0.5, 0.15), (1.0, 0.9, 0.2)
+import theme
+
+US, THEM, YOU = theme.US, theme.THEM, (1.0, 0.9, 0.2)     # YOU: on the drills' dark map only
 _C = np.linspace(0, 2 * np.pi, 13)
 _RING_A = np.stack([0.5 * np.cos(_C[:-1]), 0.5 * np.sin(_C[:-1]), np.full(12, 0.006)], axis=1)
 _RING_B = np.stack([0.5 * np.cos(_C[1:]), 0.5 * np.sin(_C[1:]), np.full(12, 0.006)], axis=1)
@@ -85,7 +87,7 @@ def skater(line, zone, pos, facing, color, shoots: str = "L", stride: float = 0.
             line(a, b, color)
 
 
-GOALIE = (1.0, 0.78, 0.35)
+GOALIE = theme.GOALIE
 
 
 @functools.lru_cache(maxsize=4)

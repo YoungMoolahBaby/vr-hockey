@@ -173,6 +173,8 @@ keys are those in `sandbox_settings.json`):
     ruled out.
   - backward and sideways speed (`back`, `side`): a share of forwards. Try 0.8 and 0.5.
 - comfort vignette (default 0.7): the view's edges darken while the thumbsticks move you (0 = off)
+- ice grid (`grid`, default off; 1 = on): the old 2 m grid on the ice. A real rink has none, and
+  every line sliding by under you is motion your inner ear doesn't feel.
 - comfort check (`check`, default every 4 min; 0 = off): the voice asks how you feel. Press A if
   you feel fine, B if you're a bit queasy, Y if you need a break (Y says to take the headset off;
   not X, which is a new puck).
@@ -420,4 +422,5 @@ Next: tuning, after the feel research (`../reports/`).
 | `game.py` | the 3-on-3 app (a sandbox mode): lays out the rink, runs the game, draws the skaters, goalies and score; `--free` for free skate on the same rink |
 | `threes.py` | the 3-on-3 game's logic, without XR: possession, the AI's choices and positions, both goalies, faceoffs, goals |
 | `arena.py` | the whole rink: both ends from zone.py (the far one turned round), its puck (both nets), markings, the scoreboard |
+| `theme.py` | the look: a white rink aboard a mothership. Solid ice, boards, painted lines, the hull and a ring of light overhead, as triangles under the line drawing; the palette, given as the colours the headset shows |
 | `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out), and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |

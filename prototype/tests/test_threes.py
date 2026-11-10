@@ -166,7 +166,9 @@ def test_the_app_runs_headless():
     at, facing = play.want_teleport
     assert np.allclose(at[[0, 2]], [0.0, 0.0], atol=1e-6)    # ... which is where you stood
     assert np.allclose(facing[[0, 2]], [0.0, -1.0], atol=1e-6)
-    verts = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
+    drawn = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
+    verts = drawn.lines
+    assert drawn.tris.shape[1] == 6 and len(drawn.tris) > 1000           # the solid rink
     assert verts.shape[1] == 6 and len(verts) > 1000
 
 
@@ -224,7 +226,9 @@ def test_free_skate_runs_headless():
     run(3000, 3010)
     assert np.linalg.norm((pz.pos - blade)[[0, 2]]) < 0.2
     assert mode.goals == {"far": 1, "home": 0}
-    verts = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
+    drawn = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
+    verts = drawn.lines
+    assert drawn.tris.shape[1] == 6 and len(drawn.tris) > 1000           # the solid rink
     assert verts.shape[1] == 6 and len(verts) > 500
     assert mode.meta()["goals"] == {"far": 1, "home": 0}
     assert "goals 1" in mode.status()
@@ -259,7 +263,9 @@ def test_free_skate_goalies_save_cover_and_pass_it_back_to_you():
     v = zone.dir_to_zone(pz.vel)
     assert float(np.linalg.norm(v)) > 4.0
     assert float(v @ to_you) / (np.linalg.norm(v) * np.linalg.norm(to_you)) > 0.95     # at your blade
-    verts = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
+    drawn = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
+    verts = drawn.lines
+    assert drawn.tris.shape[1] == 6 and len(drawn.tris) > 1000           # the solid rink
     assert verts.shape[1] == 6
     assert "saves" in mode.status() and mode.meta()["saves"]["far"] >= 1
 

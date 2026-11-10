@@ -59,12 +59,14 @@ import record
 import retrieval as rt
 import sandbox
 import stickspec
+import theme
 import zone as zn
 from contacts import Contact
 
 HERE = Path(__file__).resolve().parent
 STATE_PATH = HERE / "drill_state.json"
-GREEN, WHITE, DIM_ORANGE, GREY = (0.2, 1.0, 0.35), (0.92, 0.92, 0.92), (0.7, 0.35, 0.1), (0.55, 0.58, 0.62)
+GREEN, WHITE, DIM_ORANGE, GREY = theme.GREEN, (0.92, 0.92, 0.92), (0.7, 0.35, 0.1), (0.55, 0.58, 0.62)
+TRAIL = theme.TRAIL              # the puck's path on the (white) ice
 MAP_SCALE = 1 / 30
 
 
@@ -212,7 +214,7 @@ class DrillMode(sandbox.SandboxMode):
         self.you = self.drill.you_cls.load(STATE_PATH, self.drill.you_key)
         self.results: list[dict] = []
         self.last_verdict = ""
-        self._static = (None, None)                          # (zone, its markings' vertices)
+        self._static = (None, sandbox.NO_TRIS, None)         # ((zone, grid), its triangles, its lines)
         self._last_update = -1.0
 
     def make_physics(self) -> DrillPhysics:
@@ -357,16 +359,17 @@ class DrillMode(sandbox.SandboxMode):
         print(self.drill.line(res, self.stairs.level), flush=True)
 
     # ---- drawing (render thread)
-    def draw(self, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+    def draw(self, poses: dict, held: dict, stick, state: int) -> sandbox.Frame:
         line = sandbox.Lines()
         zone, rep = self.zone, self.rep
-        static = np.zeros((0, 6), dtype=np.float32)
+        static, static_tris = np.zeros((0, 6), dtype=np.float32), sandbox.NO_TRIS
         if zone is not None:
-            if self._static[0] is not zone:                    # the rink only changes when it's laid out
+            key = (zone, self.play.tuning.values.get("grid", 0) > 0)
+            if self._static[0] != key:                         # the rink only changes when it's laid out
                 lines = sandbox.Lines()
-                zn.markings(zone, lines, near=tuple(self.head_zone))
-                self._static = (zone, lines.array())
-            static = self._static[1]
+                zn.markings(zone, lines, near=tuple(self.head_zone), grid=key[1])
+                self._static = (key, lines.tri_array(), lines.array())
+            static_tris, static = self._static[1], self._static[2]
             if rep is not None:
                 for s in rep.skaters:
                     figures.skater(line, zone, s.pos, s.facing, figures.US if s.team == "us" else figures.THEM,
@@ -378,7 +381,7 @@ class DrillMode(sandbox.SandboxMode):
                     self._replay(line, zone, rep)
         sandbox.draw_puck(line, self.play.sim.puck)
         sandbox.draw_hands_and_stick(line, self.play, poses, held, stick, state)
-        return np.vstack([static, line.array()])
+        return sandbox.Frame(np.vstack([static_tris, line.tri_array()]), np.vstack([static, line.array()]))
 
     def _replay(self, line, zone: zn.Zone, rep) -> None:
         """After a rep: the best play and the puck's path on the ice, and a map in front of you
@@ -394,7 +397,7 @@ class DrillMode(sandbox.SandboxMode):
         trail = np.array(rep.trail) if len(rep.trail) > 1 else None
         if trail is not None:
             P = zone.world_many(trail, 0.02)
-            line.many(P[:-1], P[1:], WHITE)
+            line.many(P[:-1], P[1:], TRAIL)
         if self.play.head is None:
             return
         Rh, ph = self.play.head                               # the map: a model of the zone, waist high
@@ -411,6 +414,9 @@ class DrillMode(sandbox.SandboxMode):
             P = at(pts)
             line.many(P[:-1], P[1:], col)
 
+        rim = at(zn.outline(8)) - np.array([0.0, 0.003, 0.0])  # a dark panel under the map
+        mid_p = np.repeat(rim.mean(axis=0)[None], len(rim), axis=0)
+        line.solid(np.stack([mid_p, rim, np.roll(rim, -1, axis=0)], axis=1).reshape(-1, 3), theme.PANEL)
         poly(zn.outline(8), zn.BOARDS)
         poly([(-zn.WIDTH / 2, zn.BLUE_Z), (zn.WIDTH / 2, zn.BLUE_Z)], zn.BLUE)
         g = zn.side_boards_x(zn.GOAL_Z)

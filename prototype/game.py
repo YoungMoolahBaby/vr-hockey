@@ -108,7 +108,7 @@ class GameMode(sandbox.SandboxMode):
         self.game: threes.Game | None = None
         self.want_place: str | None = None
         self.rng = np.random.default_rng()
-        self._static = (None, None)
+        self._static = (None, sandbox.NO_TRIS, None)            # (key, the rink's triangles, its lines)
         self.games: list[dict] = []
 
     def make_physics(self) -> GamePhysics:
@@ -234,16 +234,17 @@ class GameMode(sandbox.SandboxMode):
             self.voice.say(f"Us {s['us']}, them {s['them']}.", key="game")
 
     # ---- drawing (render thread)
-    def draw(self, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+    def draw(self, poses: dict, held: dict, stick, state: int) -> sandbox.Frame:
         line = sandbox.Lines()
         arena, g = self.arena, self.game
-        static = np.zeros((0, 6), dtype=np.float32)
+        static, static_tris = np.zeros((0, 6), dtype=np.float32), sandbox.NO_TRIS
         if arena is not None:
-            if self._static[0] is not arena:              # the rink only changes when it's laid out
+            key = (arena, self.play.tuning.values.get("grid", 0) > 0)
+            if self._static[0] != key:                    # the rink only changes when it's laid out
                 lines = sandbox.Lines()
-                ar.markings(arena, lines)
-                self._static = (arena, lines.array())
-            static = self._static[1]
+                ar.markings(arena, lines, grid=key[1])
+                self._static = (key, lines.tri_array(), lines.array())
+            static_tris, static = self._static[1], self._static[2]
         if g is not None:
             zone = arena.zone
             for p in g.players:
@@ -256,7 +257,7 @@ class GameMode(sandbox.SandboxMode):
             ar.scoreboard(arena, line, g.score["us"], g.score["them"], (figures.US, figures.THEM))
         sandbox.draw_puck(line, self.play.sim.puck)
         sandbox.draw_hands_and_stick(line, self.play, poses, held, stick, state)
-        return np.vstack([static, line.array()])
+        return sandbox.Frame(np.vstack([static_tris, line.tri_array()]), np.vstack([static, line.array()]))
 
     def status(self) -> str:
         g = self.game
@@ -378,22 +379,23 @@ class FreeSkateMode(GameMode):
     def button(self, name: str, t_sim: float) -> None:
         sandbox.SandboxMode.button(self, name, t_sim)       # X a puck, B the setting, A save the settings
 
-    def draw(self, poses: dict, held: dict, stick, state: int) -> np.ndarray:
+    def draw(self, poses: dict, held: dict, stick, state: int) -> sandbox.Frame:
         line = sandbox.Lines()
-        static = np.zeros((0, 6), dtype=np.float32)
+        static, static_tris = np.zeros((0, 6), dtype=np.float32), sandbox.NO_TRIS
         if self.arena is not None:
-            if self._static[0] is not self.arena:
+            key = (self.arena, self.play.tuning.values.get("grid", 0) > 0)
+            if self._static[0] != key:
                 lines = sandbox.Lines()
-                ar.markings(self.arena, lines)
-                self._static = (self.arena, lines.array())
-            static = self._static[1]
+                ar.markings(self.arena, lines, grid=key[1])
+                self._static = (key, lines.tri_array(), lines.array())
+            static_tris, static = self._static[1], self._static[2]
         if self.goalies is not None:
             for k in self.goalies.keepers.values():
                 figures.goalie(line, self.arena.zone if k.end == "home" else self.arena.far, k.g.c, k.g.facing,
                                down=k.g.mode != "track" or k.hold_since is not None)
         sandbox.draw_puck(line, self.play.sim.puck)
         sandbox.draw_hands_and_stick(line, self.play, poses, held, stick, state)
-        return np.vstack([static, line.array()])
+        return sandbox.Frame(np.vstack([static_tris, line.tri_array()]), np.vstack([static, line.array()]))
 
     def status(self) -> str:
         err = getattr(self.physics, "errors", 0)

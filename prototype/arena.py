@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 import puck as pk
+import theme
 import zone as zn
 
 FT = zn.FT
@@ -128,23 +129,42 @@ def side_x(arena: Arena, z: float) -> float:
     return zn.side_boards_x(min(z, arena.length - z))
 
 
-def markings(arena: Arena, line) -> None:
-    """The rink: boards (bottom and top rail), a 2 m ice grid, goal lines, blue lines, the red
-    line, the circles, both creases and both nets."""
+def markings(arena: Arena, line, grid: bool = False) -> None:
+    """The rink: solid ice, boards and painted lines inside the mothership (theme.py) if line takes
+    triangles (line.solid); as lines, the boards' edges, goal lines, blue lines, the red line, the
+    circles, both creases and both nets; the 2 m ice grid if grid is on."""
     zone, L, half = arena.zone, arena.length, zn.WIDTH / 2
     W = zone.to_world
     pts = outline(arena)
-    for y in (0.0, zn.BOARDS_H):
-        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
-            line(W(x0, y, z0), W(x1, y, z1), zn.BOARDS)
-    for x, z in pts[::4]:
-        line(W(x, 0, z), W(x, zn.BOARDS_H, z), zn.BOARDS)
-    for gx in np.arange(-12, 12.1, 2.0):                                     # ice grid, every 2 m
-        e = zn.end_boards_z(gx)
-        line(W(gx, 0, e), W(gx, 0, L - e), zn.ICE)
-    for gz in np.arange(2.0, L - 1.0, 2.0):
-        k = side_x(arena, gz)
-        line(W(-k, 0, gz), W(k, 0, gz), zn.ICE)
+    solid = getattr(line, "solid", None)
+    if solid is not None:
+        s = theme.Surf(solid, zone.origin, zone.X, zone.Z)
+        rim = pts[:-1]
+        theme.ice(s, rim)
+        theme.boards(s, rim, zn.BOARDS_H)
+        theme.mothership(s, rim)
+        P = theme.PAINT_Y
+        for bz in arena.blue:
+            s.band((-half, bz), (half, bz), theme.WIDE, P, zn.BLUE)
+        s.band((-half, L / 2), (half, L / 2), theme.WIDE, P, zn.RED)
+        s.arc((0.0, L / 2), CENTER_R, theme.THIN, P, zn.BLUE)
+        s.disc((0.0, L / 2), 0.15, P, zn.BLUE)
+        for end in (zone, arena.far):                                        # each end, in its own frame
+            e = theme.Surf(solid, end.origin, end.X, end.Z)
+            gl = zn.side_boards_x(zn.GOAL_Z)
+            e.band((-gl, zn.GOAL_Z), (gl, zn.GOAL_Z), theme.THIN, P, zn.RED)
+            e.disc((0.0, zn.GOAL_Z), zn.CREASE_R, P, theme.CREASE, 0.0, np.pi)
+            for sx in (-zn.CIRCLE_X, zn.CIRCLE_X):
+                e.arc((sx, zn.CIRCLE_Z), zn.CIRCLE_R, theme.THIN, P, zn.RED)
+                e.disc((sx, zn.CIRCLE_Z), 0.3, P, zn.RED)
+    theme.board_lines(line, W, pts, zn.BOARDS_H)
+    if grid:
+        for gx in np.arange(-12, 12.1, 2.0):                                 # ice grid, every 2 m
+            e = zn.end_boards_z(gx)
+            line(W(gx, 0.001, e), W(gx, 0.001, L - e), zn.ICE)
+        for gz in np.arange(2.0, L - 1.0, 2.0):
+            k = side_x(arena, gz)
+            line(W(-k, 0.001, gz), W(k, 0.001, gz), zn.ICE)
     for gz in (zn.GOAL_Z, L - zn.GOAL_Z):                                    # goal lines
         k = side_x(arena, gz)
         line(W(-k, 0.003, gz), W(k, 0.003, gz), zn.RED)
@@ -165,7 +185,7 @@ def markings(arena: Arena, line) -> None:
         c = np.linspace(0, np.pi, 15)
         cr = [Z(zn.CREASE_R * np.cos(t), 0.003, zn.GOAL_Z + zn.CREASE_R * np.sin(t)) for t in c]
         for p0, p1 in zip(cr, cr[1:]):
-            line(p0, p1, zn.BLUE)
+            line(p0, p1, zn.RED)
         a = np.linspace(0, 2 * np.pi, 33)
         for sx in (-zn.CIRCLE_X, zn.CIRCLE_X):
             ring = [Z(sx + zn.CIRCLE_R * np.cos(t), 0.003, zn.CIRCLE_Z + zn.CIRCLE_R * np.sin(t)) for t in a]
