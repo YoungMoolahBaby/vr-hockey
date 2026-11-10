@@ -154,9 +154,11 @@ synthesis): what would make the puck, the skating and the turning feel like hock
   - no low-speed bounce fade;
   - the AI's and the drills' puck predictions include the drag.
 - **The skating, built as settings, off by default, to try one at a time:** a bounded push, a
-  glide, a hockey stop, a turn limit at speed, and slower backward and sideways skating. A 0-10
-  comfort check and a per-frame log of the thumbsticks' motion come with them. The old easing
-  starts and ends every move at about 2 g, and that may be what made the 3v3 sickening.
+  glide, a hockey stop, a turn limit at speed, and slower backward and sideways skating. A comfort
+  check (A fine, B a bit queasy, X a break) and a per-frame log of the thumbsticks' motion come
+  with them. The old easing starts and ends every move at about 2 g. In the first A/B, the push
+  limit (6 m/s²) felt solid, and turning it off brought the motion sickness back within seconds,
+  so push is now on by default.
 
 ## Ice assist
 

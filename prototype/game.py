@@ -436,6 +436,7 @@ def main() -> None:
     ap.add_argument("--notes", default="")
     ap.add_argument("--set", action="append", metavar="KEY=VALUE",
                     help="a setting for this run, e.g. --set push=6 --set glide=1.5 (keys as in sandbox_settings.json)")
+    ap.add_argument("--tune", metavar="KEY", help="open the tuning menu on this setting (e.g. push), for an A/B")
     args = ap.parse_args()
 
     base = stickspec.from_height(stickspec.parse_height(args.height), args.shoots)
@@ -448,6 +449,7 @@ def main() -> None:
             values[key] = v
     sandbox.set_values(values, args.set)
     play = sandbox.Play(sandbox.Tuning(base, values))
+    sandbox.tune_first(play.tuning, args.tune)
     base_cls = FreeSkateMode if args.free else GameMode
     mode_cls = type("ThreesMode", (base_cls,), {"to_goals": args.to, "level": args.level, "length": args.length,
                                                 "goalie_ends": () if args.empty else ("home", "far")})

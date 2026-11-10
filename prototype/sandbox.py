@@ -71,6 +71,9 @@ HERE = Path(__file__).resolve().parent
 SETTINGS_PATH = HERE / "sandbox_settings.json"
 SNAP_DEG = 0.0           # smooth turning (Jon's pick); 30 turns you in steps, the comfort option
 VIGNETTE = 0.7           # comfort: the view's edges darken while the thumbsticks move you (0 = off)
+PUSH = 6.0               # m/s^2: the skating push limit (rig.Drive.push), the research's pick. ON: with it off
+                         # (the old easing, 20-47 m/s^2 jolts) Jon got sick within seconds; 6 "was solid", and
+                         # 6-10 felt fine at 3 and 4 m/s (free skate 2026-11-09). 0 = the old easing
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
@@ -130,6 +133,15 @@ SETTINGS = (
 )
 
 
+def tune_first(tuning: "Tuning", key: str | None) -> None:
+    """--tune KEY: the tuning menu opens on that setting (for an A/B: click, change it, click back)."""
+    if key:
+        keys = [s.key for s in SETTINGS]
+        if key not in keys:
+            raise SystemExit(f"--tune {key}: one of {', '.join(keys)}")
+        tuning.i = keys.index(key)
+
+
 def set_values(values: dict, items) -> None:
     """--set KEY=VALUE overrides (e.g. push=6 glide=1.5), checked against the settings' keys."""
     for item in items or ():
@@ -155,7 +167,7 @@ class Tuning:
                 "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING,
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
-                "push": 0.0, "glide": 0.0, "stop": 0.0, "carve": 0.0, "back": 1.0, "side": 1.0,
+                "push": PUSH, "glide": 0.0, "stop": 0.0, "carve": 0.0, "back": 1.0, "side": 1.0,
                 "snap": SNAP_DEG, "vignette": VIGNETTE, "check": COMFORT_CHECK_MIN, "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
@@ -688,13 +700,15 @@ class Comfort:
 
     - rig.csv: every frame, the sticks, the drive's velocity, turn rate and mode, and the vignette.
     - A queasiness check every `check` minutes of play (the "comfort check" setting; 0 = off): the
-      voice asks for 0-10, the left stick up/down picks it, a click answers it (you stand still
-      meanwhile). At STOP_AT or more it says to take a break (Farmani & Teather 2020: 4/10 is where
-      nausea became notable). Tune skating one change at a time against these ratings.
+      voice asks, and you press A (fine), B (a bit queasy) or X (I need a break). Logged as 0, 2
+      and 5 on the usual 0-10 scale, where 4 is about where nausea becomes notable (Farmani &
+      Teather 2020): X says to take the headset off. (A 0-10 count on the left stick was too fiddly
+      in the headset: Jon couldn't tell how to answer.) Tune skating one change at a time against
+      these answers.
     - summary(): for meta.json (time moving, hard accelerations, turn rates, the ratings)."""
 
     TIMEOUT = 30.0
-    STOP_AT = 4
+    ANSWERS = {"a": ("fine", 0), "b": ("a bit queasy", 2), "x": ("need a break", 5)}
     HARD = (2.0, 6.0)                 # m/s^2: accelerations counted (events above 2, time above 6)
 
     def __init__(self, path: Path | None, voice, log):
@@ -702,9 +716,7 @@ class Comfort:
         self.fh = open(path, "w", newline="") if path is not None else None
         if self.fh is not None:
             self.fh.write("t,lx,ly,rx,moving,mode,vx,vz,speed,omega,accel,vignette\n")
-        self.stick = Stick()
         self.asking_since: float | None = None
-        self.rating = 0
         self.play_s = 0.0
         self.next_check: float | None = None
         self.ratings: list[dict] = []
@@ -744,31 +756,28 @@ class Comfort:
         if self.next_check is None:
             self.next_check = self.play_s + every_min * 60
         if not self.asking and self.play_s >= self.next_check:
-            self.asking_since, self.rating = now, 0
-            self.voice.say("Comfort check. How queasy are you, zero to ten? Left stick up or down, then click it.",
+            self.asking_since = now
+            self.voice.say("Comfort check. Press A if you feel fine, B if you're a bit queasy, X if you need a break.",
                            key="comfort")
         if self.asking and now - self.asking_since > self.TIMEOUT:
             self.asking_since = None
             self.next_check = self.play_s + every_min * 60
-            self.log.event(t_sim, "comfort", rating=None)
+            self.log.event(t_sim, "comfort", answer=None, rating=None)
 
-    def pick(self, ly: float, now: float) -> None:
-        """While asking: the left stick up or down picks the number."""
-        d = self.stick.update(ly, now)
-        if d:
-            self.rating = int(np.clip(self.rating + d, 0, 10))
-            self.voice.say(str(self.rating), key="comfort")
-
-    def answer(self, t_sim: float, every_min: float) -> None:
-        """The click: the rating is in."""
-        r = self.rating
+    def answer(self, button: str, t_sim: float, every_min: float) -> bool:
+        """A, B or X while asking: the answer (True: the button was the answer, not its usual job)."""
+        if not self.asking or button not in self.ANSWERS:
+            return False
+        word, r = self.ANSWERS[button]
         self.asking_since = None
         self.next_check = self.play_s + every_min * 60 if every_min > 0 else None
-        self.ratings.append({"t": round(t_sim, 1), "play_min": round(self.play_s / 60, 1), "rating": r})
-        self.log.event(t_sim, "comfort", rating=r)
-        print(f"  comfort: {r}/10 after {self.play_s / 60:.1f} min", flush=True)
-        self.voice.say(f"{r}. Time for a break: take the headset off." if r >= self.STOP_AT else f"{r}. Thanks.",
-                       key="comfort")
+        self.ratings.append({"t": round(t_sim, 1), "play_min": round(self.play_s / 60, 1), "answer": word,
+                             "rating": r})
+        self.log.event(t_sim, "comfort", answer=word, rating=r)
+        print(f"  comfort: {word} ({r}/10) after {self.play_s / 60:.1f} min", flush=True)
+        self.voice.say("Take a break: take the headset off." if button == "x" else
+                       "Thanks. Tell Claude what feels off." if button == "b" else "Thanks.", key="comfort")
+        return True
 
     def summary(self) -> dict:
         s = dict(self.stats)
@@ -857,6 +866,7 @@ def main() -> None:
     ap.add_argument("--notes", default="")
     ap.add_argument("--set", action="append", metavar="KEY=VALUE",
                     help="a setting for this run, e.g. --set push=6 --set glide=1.5 (keys as in sandbox_settings.json)")
+    ap.add_argument("--tune", metavar="KEY", help="open the tuning menu on this setting (e.g. push), for an A/B")
     args = ap.parse_args()
 
     base = stickspec.from_height(stickspec.parse_height(args.height), args.shoots)
@@ -866,6 +876,7 @@ def main() -> None:
         values.update(json.loads(SETTINGS_PATH.read_text())["values"])
     set_values(values, args.set)
     play = Play(Tuning(base, values))
+    tune_first(play.tuning, args.tune)
     run_dir = HERE / "data" / ("sandbox-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
     lock = record.take_lock()
     try:
@@ -1009,8 +1020,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     elif abs(rx) < 0.35:
                         snap_ready = True
                     rx = 0.0
-                skating = moving and not comfort.asking            # standing still while you answer
-                vel, omega = drive.update((lx, ly) if skating else (0.0, 0.0), rx,
+                vel, omega = drive.update((lx, ly) if moving else (0.0, 0.0), rx,
                                           play.head[0] if play.head is not None else None, dt_frame)
                 vel = drive.vel = mode.confine(play.head[1] if play.head is not None else None, vel, dt_frame)
                 play.rig.drive(t_disp * 1e-9, vel, omega, pivot)
@@ -1023,8 +1033,6 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 if focused:                                     # play time only (not while the headset sleeps)
                     comfort.frame(now, sampler.shared.t_now, dt_frame, (lx, ly, rx), moving, drive, vel, omega,
                                   tunnel * tv["vignette"], tv["check"])
-                if comfort.asking:
-                    comfort.pick(ly, now)
 
                 # ---- tuning and buttons
                 tu = play.tuning
@@ -1035,7 +1043,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     tu.pick(d)
                     voice.say(tu.describe(), key="setting")
                     announced = True
-                d = change.update(ly if vert and not moving and not comfort.asking else 0.0, now)
+                d = change.update(ly if vert and not moving else 0.0, now)
                 if d and tu.change(d):
                     play.retune()
                     last_change, announced = now, False
@@ -1052,7 +1060,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                     if new_fit != play.fit:
                         tu.values.update(roll=new_fit.roll_deg, pitch=new_fit.pitch_deg, yaw=new_fit.yaw_deg)
                         play.retune()
-                if inp["x"] and not prev["x"]:
+                answered = False
+                for b in ("a", "b", "x"):                      # the comfort check's answer, if it's asking
+                    if inp[b] and not prev[b] and comfort.answer(b, sampler.shared.t_now, tv["check"]):
+                        answered = True
+                if inp["x"] and not prev["x"] and not answered:
                     mode.button("x", sampler.shared.t_now)
                 # the left stick's click, only with the stick centred (pushing it hard clicks it too):
                 # a quick press switches it between moving you and tuning; a 1 s press recenters
@@ -1064,19 +1076,16 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                         click_done = True
                         mode.recenter()
                 else:
-                    if (click_since is not None and click_centred and not click_done and now - click_since < 0.5
-                            and comfort.asking):
-                        comfort.answer(sampler.shared.t_now, tv["check"])
-                    elif click_since is not None and click_centred and not click_done and now - click_since < 0.5:
+                    if click_since is not None and click_centred and not click_done and now - click_since < 0.5:
                         moving = not moving
                         voice.say("Moving. Left stick moves you, right stick turns you." if moving else
                                   f"Tuning. {tu.describe()}", key="setting")
                         announced = True
                         log.event(sampler.shared.t_now, "left_stick", mode="move" if moving else "tune")
                     click_since, click_done = None, False
-                if inp["b"] and not prev["b"] and not play.fitting:
+                if inp["b"] and not prev["b"] and not play.fitting and not answered:
                     mode.button("b", sampler.shared.t_now)
-                if inp["a"] and not prev["a"] and play.fitting:
+                if inp["a"] and not prev["a"] and play.fitting and not answered:
                     play.fitting = False
                     play.fit.save(record.FIT_PATH, play.spec)
                     SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
@@ -1085,7 +1094,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                               f"swung {f.yaw_deg:.0f} degrees.", key="fit")
                     log.event(sampler.shared.t_now, "fit_saved", **f.to_dict())
                     inputs.buzz(top_hand_dev, 0.8, 60)
-                elif inp["a"] and not prev["a"]:
+                elif inp["a"] and not prev["a"] and not answered:
                     mode.button("a", sampler.shared.t_now)
                 mode.frame(now)
                 for k in prev:
