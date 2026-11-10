@@ -150,8 +150,8 @@ keys are those in `sandbox_settings.json`):
 - blade grip, buzz strength
 - skate speed (default 3 m/s), snap turn (default 0 = smooth; 30 turns in 30-degree steps) and smooth turn speed
   (default 150 deg/s): the thumbsticks, everywhere
-- **The skating model** (`rig.Drive`): push (6 m/s²), glide (1.5) and the hockey stop (8) are on;
-  the others are off by default.
+- **The skating model** (`rig.Drive`): push (6 m/s²), glide (1.5), the hockey stop (8) and the
+  turn limit (6) are on; the others are off by default.
   Try them one at a time, in this order, with the comfort check on:
   - push (`push`, m/s²): speed up at most this hard, easing in at the top, half as hard
     backwards; with no glide, letting go slows you at this rate too. 6 is a rec skater's first
@@ -168,7 +168,9 @@ keys are those in `sandbox_settings.json`):
     through it.
   - turn limit (`carve`, m/s²): your path can't bend harder than this sideways. A glance doesn't
     whip it round, the right stick's turn is capped at speed (115°/s at 3 m/s for 6), and turning
-    carves your path with you. Try 6, then 8.
+    carves your path with you. 6 "felt good" (free skate, 2026-11-10). 9, which doesn't cap the
+    turn at 3 m/s, left Jon "a little motion sick" after 16 minutes; the session's length wasn't
+    ruled out.
   - backward and sideways speed (`back`, `side`): a share of forwards. Try 0.8 and 0.5.
 - comfort vignette (default 0.7): the view's edges darken while the thumbsticks move you (0 = off)
 - comfort check (`check`, default every 4 min; 0 = off): the voice asks how you feel. Press A if

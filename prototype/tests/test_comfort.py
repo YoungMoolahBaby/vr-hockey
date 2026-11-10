@@ -116,7 +116,7 @@ def test_the_defaults_skate_as_before_and_the_puck_as_the_research_says():
     values = sandbox.Tuning.defaults(spec, grab.Fit(), pk.Params())
     assert values["push"] == sandbox.PUSH > 0                   # on: the old easing made Jon sick in seconds
     assert values["glide"] == sandbox.GLIDE > 0 and values["stop"] == sandbox.STOP > 0   # both felt good
-    assert values["carve"] == 0
+    assert values["carve"] == sandbox.CARVE > 0                 # 6 felt good; 9 left him a little sick
     assert values["back"] == values["side"] == 1.0
     p = pk.Params()
     assert (p.ice_mu, p.board_bounce, p.ice_bounce, p.air_k, p.soft_hands) == (0.085, 0.30, 0.20, 0.0043, 0.0)

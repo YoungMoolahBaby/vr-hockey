@@ -153,12 +153,13 @@ synthesis): what would make the puck, the skating and the turning feel like hock
   - a "hands" setting (the stick's damping) in place of "blade pop", which did almost nothing;
   - no low-speed bounce fade;
   - the AI's and the drills' puck predictions include the drag.
-- **The skating, built as settings, off by default, to try one at a time:** a bounded push, a
+- **The skating, built as settings to try one at a time:** a bounded push, a
   glide, a hockey stop, a turn limit at speed, and slower backward and sideways skating. A comfort
   check (A fine, B a bit queasy, Y a break) and a per-frame log of the thumbsticks' motion come
   with them. The old easing starts and ends every move at about 2 g. In the first A/B, the push
   limit (6 m/s²) felt solid, and turning it off brought the motion sickness back within seconds,
-  so push is now on by default.
+  so push is now on by default. The glide (1.5 m/s²), the hockey stop (8) and the turn limit (6)
+  felt good in the next tests and are on by default too.
 
 ## Ice assist
 

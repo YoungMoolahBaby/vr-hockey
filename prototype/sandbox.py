@@ -77,6 +77,9 @@ PUSH = 6.0               # m/s^2: the skating push limit (rig.Drive.push), the r
 GLIDE = 1.5              # m/s^2: let go and you coast, slowing at this (rig.Drive.glide): 2 s and 3 m from 3 m/s.
 STOP = 8.0               # m/s^2: the hockey stop, the left stick held against your motion (rig.Drive.stop_ms2).
                          # Both "felt good" (free skate 2026-11-09, with push 6); 0 = off
+CARVE = 6.0              # m/s^2: the turn limit, the path bends at most this hard sideways (rig.Drive.carve): the
+                         # stick's turn tops out at 115 deg/s at 3 m/s. 6 "felt good"; 9 (no cap at 3 m/s) left
+                         # Jon "a little motion sick" after 16 min (free skate 2026-11-10); 0 = off
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
@@ -170,7 +173,7 @@ class Tuning:
                 "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING,
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
-                "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": 0.0, "back": 1.0, "side": 1.0,
+                "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
                 "snap": SNAP_DEG, "vignette": VIGNETTE, "check": COMFORT_CHECK_MIN, "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
