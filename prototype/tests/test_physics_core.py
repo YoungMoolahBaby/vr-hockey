@@ -183,5 +183,5 @@ def test_warm_runs():
     import physics_core
     assert physics_core.warm() < 120
     import dataclasses
-    # warm() passes 13 parameters (prm); a new Params field must be added there too
-    assert len(dataclasses.fields(pk.Params)) == 13
+    # warm() passes 14 parameters (prm); a new Params field must be added there too
+    assert len(dataclasses.fields(pk.Params)) == 14

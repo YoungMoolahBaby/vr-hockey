@@ -36,7 +36,7 @@ def _pinned_then_lifted(fast: bool) -> float:
             if tt > 1.15:
                 highest = max(highest, float((bot + sim.bend + sim.slide)[:, 1].min()))
         assert sim.puck.speed > 5.0                               # the blade hit it
-        assert abs(highest) < 0.003                               # on the ice all along
+        assert abs(highest) < 0.01                                # on the ice (within the ease-off's lift)
         return top_vy
     finally:
         pk.FAST = was
@@ -109,3 +109,51 @@ def _rebound(damping: float, v_in: float = 4.0) -> float:
 def test_soft_hands_catch_a_pass_that_firm_hands_send_back():
     assert _rebound(pk.Flex.DAMPING) > 0.02                    # firm: it comes back off the blade
     assert _rebound(sandbox.HANDLE) < 0.5 * _rebound(pk.Flex.DAMPING)   # soft: far less
+
+
+def _lift_out(u: float, damping: float, ease: float = 1.0, puck_x: float | None = None, depth: float = 0.15):
+    """Hands pressing the blade `depth` under the ice for 1 s, then rising at u m/s until 25 cm clear.
+    Returns per-ms (t, the blade's lowest point) after the lift starts, and the puck's top speed."""
+    sim = pk.Sim(pk.Params(ease_off=ease), RINK, 75)
+    sim.flex.damping = damping
+    sim.flex.set_flex(75)
+    if puck_x is not None:
+        sim.puck.spawn(np.array([puck_x, 0.0]))
+    out, top = [], 0.0
+    for k in range(1600):
+        tt = k * 0.001
+        y = -depth * min(tt / 0.8, 1.0)
+        if tt > 1.0:
+            y = min(-depth + u * (tt - 1.0), 0.25)
+        bot, tp = blade_at(0.0, 0.0, y=y)
+        sim.step(0.001, bot, tp, bot.mean(axis=0), SHAFT)
+        top = max(top, sim.puck.speed)
+        if tt > 1.0:
+            out.append((tt, float((bot + sim.bend + sim.slide)[:, 1].min())))
+    return np.array(out), top
+
+
+@pytest.mark.parametrize("damping", [0.6, 1.5])
+@pytest.mark.parametrize("u", [1.0, 3.0, 6.0])
+def test_a_blade_eases_off_the_ice_after_a_press(damping, u):
+    """reports/Shot release.md, change 2: the blade lifts out of a press from rest, as a bent shaft lets
+    it go; it used to step to the hands' full rising speed in one tick."""
+    a, _ = _lift_out(u, damping)
+    v = np.diff(a[:, 1]) / 0.001                                # the blade's rising speed, per ms
+    off = np.flatnonzero(a[:, 1] > 0.001)[0]                    # the first ms clear of the ice
+    assert v[off - 1] < 0.6 * u                                 # it leaves slower than the hands rise
+    assert np.max(np.diff(v)) < 0.5 * u + 0.5                   # no step: never half the hands' speed in a ms
+    k90 = np.flatnonzero(v > 0.9 * u)
+    assert len(k90)                                             # ... and it catches up with them
+    a0, _ = _lift_out(u, damping, ease=0.0)                     # the old physics: a step
+    v0 = np.diff(a0[:, 1]) / 0.001
+    assert np.max(np.diff(v0)) > 0.6 * u
+
+
+@pytest.mark.parametrize("damping", [0.6, 1.5])
+@pytest.mark.parametrize("u", [2.0, 6.0])
+def test_lifting_a_pressed_stick_beside_a_resting_puck_does_not_fire_it(damping, u):
+    """Session 2's lesson: a stick held low, then lifted, fired a resting puck at 6 m/s. The ease-off
+    hands part of the press to the flex, so it must stay harmless with soft and firm hands alike."""
+    _, top = _lift_out(u, damping, puck_x=0.052)
+    assert top < 0.5

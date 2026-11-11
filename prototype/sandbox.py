@@ -67,6 +67,7 @@ import puck as pk
 import recfmt
 import record
 import rig
+import shotcall
 import stickmath
 import stickspec
 import theme
@@ -109,6 +110,22 @@ SKATES = 0.0             # cm: skate height ("skate height"): the ice sits this 
                          # barefoot (no reliable published figure; blogs say 1-3 inches). 0 = off: the ice is your floor
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
+# The blade's velocity at a contact (reports/Shot release.md, change 1). One sample's pose difference was
+# ~10x noisier than needed (per-ms changes of 13 m/s at p99 in shots, implied accelerations of 10,000-
+# 15,000 m/s^2 against pros' ~400-600): a least-squares fit over a few ms of samples, with their true
+# times, cuts it 4-5x for 2 ms of delay on the contact velocity only (the stick is drawn and swept
+# where the hands are). Sample gaps use their true length (they were clipped at 10 ms: the puck lost time).
+VEL_WINDOW_S = 0.0       # s: the fit's window; 0 = one sample's difference. OFF: on Jon's replays (2026-11-10) a 4 ms
+                         # fit made his fastest swing's shot faster (76 -> 113 mph; 8 ms: 97): it lags the virtual
+                         # stick's near-instant stops, which no real stick makes, so the puck got the speed the blade
+                         # had just had. Fewer launches in one session (7 -> 4), not in the other. Try 0.004 or 0.008
+STALL_S = 0.020          # s: a gap between samples longer than this is a jump: no sweep, no velocity from it
+JUMP_MS = 50.0           # m/s: the sweet spot moving faster than this between samples is a tracking jump, not a
+                         # swing (Jon's fastest real blade: ~47 m/s, 4.7 cm a tick): no sweep, no velocity
+SUBSTEP_S = 0.00025      # s: the physics' longest substep (a long gap between samples takes more of them)
+MAX_DT = 0.25            # s: a longer gap (a stall) only advances the puck this far
+TRACKED = recfmt.FLAG_ORI_TRACKED | recfmt.FLAG_POS_TRACKED
+VALID = recfmt.FLAG_ORI_VALID | recfmt.FLAG_POS_VALID
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
 # the stick the headset draws (~45 ms ahead over Link). OFF: the runtime's poses that far ahead are
 # steppy (free skate 2026-11-09: per-sample hand speed spiked to 3.4x its 20 ms average at p99, against
@@ -374,7 +391,7 @@ class Physics:
         self.grab = grab.Grab(play.spec, play.fit)
         self.version = -1
         self.last_t = None
-        self.shot = None              # [t of first contact, peak speed]
+        self.shot = None              # shotcall.ShotCall for this puck (None: a new puck)
         self.respawn_at = None
         self.slow_since = None
         self.last_buzz = 0.0
@@ -382,6 +399,9 @@ class Physics:
         self.shots = []
         self._last_sweet = None
         self._last_yaw = 0.0
+        self._ring = collections.deque()      # recent (t, rigid blade points): Physics._velocity
+        self._t = 0.0
+        self._stalled = False
         self._refresh()
 
     def _refresh(self) -> None:
@@ -439,7 +459,10 @@ class Physics:
         if pl.version != self.version:
             self._refresh()
         self._firmness()
-        dt_s = 0.001 if self.last_t is None else float(np.clip(t - self.last_t, 0.0002, 0.01))
+        gap = 0.001 if self.last_t is None else float(t - self.last_t)
+        dt_s = min(max(gap, 0.0002), MAX_DT)
+        self._stalled = gap > STALL_S
+        self._t = t
         self.last_t = t
         spec = pl.spec
         top, bot = tick.get(spec.top_hand), tick.get(spec.bottom_hand)
@@ -484,10 +507,21 @@ class Physics:
             if last is not None and float(np.linalg.norm(a - last)) > JUMP_M:
                 sim._last = None                        # a snap turn or a teleport: don't sweep the blade
                 self._carry(a, last, yaw - self._last_yaw)
+                self._ring.clear()
+            elif last is not None and (getattr(self, "_stalled", False)
+                                       or float(np.linalg.norm(a - last)) > JUMP_MS * dt_s):
+                sim._last = None                        # a stall or a tracking jump: no sweep, no velocity
+                self._ring.clear()
             self._last_sweet = a
         else:
             self._last_sweet = None
+            self._ring.clear()
         self._last_yaw = yaw
+        if held and not self._tracked():                # a hand holding it only guessed: no hits this tick
+            held = False
+            self._last_sweet = None
+            self._ring.clear()
+        substeps = max(4, int(math.ceil(dt_s / SUBSTEP_S - 1e-9)))
         if held:
             bot_e = self.edge_b @ R.T + p
             top_e = self.edge_t @ R.T + p
@@ -498,11 +532,42 @@ class Physics:
                 bot_e[:, 1] -= drop
                 top_e[:, 1] -= drop
                 anchor[1] -= drop
-            imp = sim.step(dt_s, bot_e, top_e, anchor, R @ self.u, body=getattr(self.play, "body", None))
+            imp = sim.step(dt_s, bot_e, top_e, anchor, R @ self.u, substeps=substeps,
+                           body=getattr(self.play, "body", None), rvel=self._velocity(bot_e, top_e, anchor))
         else:
-            imp = sim.step(dt_s, None, None)
+            imp = sim.step(dt_s, None, None, substeps=substeps)
         self.last_impulse = imp
         return imp
+
+    def _tracked(self) -> bool:
+        """Whether the hands holding the stick are tracked (not only valid: guessed from the motion
+        sensors). Unknown flags (0, e.g. a replay without them) count as tracked."""
+        spec, flags = self.play.spec, self.play.latest_flags
+        for who in HOLDERS.get(self.play.stick_state, ()):
+            f = flags.get(spec.top_hand if who == "top" else spec.bottom_hand, 0)
+            if f & VALID == VALID and f & TRACKED != TRACKED:
+                return False
+        return True
+
+    def _velocity(self, bot_e, top_e, anchor):
+        """The rigid blade's velocities (bottom edge, top edge, anchor rows) fitted over the last
+        VEL_WINDOW_S of samples, or None (one sample's difference) without two samples in it."""
+        if VEL_WINDOW_S <= 0:
+            return None
+        t = self._t
+        ring = self._ring
+        ring.append((t, np.vstack([bot_e, top_e, anchor[None]])))
+        while ring and t - ring[0][0] > VEL_WINDOW_S + 1e-9:
+            ring.popleft()
+        if len(ring) < 2:
+            return None
+        ts = np.array([e[0] for e in ring])
+        X = np.array([e[1] for e in ring])
+        tm = ts - ts.mean()
+        den = float(tm @ tm)
+        if den <= 0:
+            return None
+        return np.tensordot(tm, X - X.mean(axis=0), axes=1) / den
 
     def _carry(self, a, last, dyaw: float) -> None:
         """A puck on the blade when you snap-turn (or are moved) goes with it."""
@@ -573,20 +638,14 @@ class Physics:
             self.slow_since = None
 
     def _call_shot(self, t: float, imp: float) -> None:
-        """Shots: a hard contact, then call the speed once it's away."""
-        pz = self.play.sim.puck
-        if imp > 2.0 and pz.speed > 6.0:
-            if self.shot is None:
-                self.shot = [t, pz.speed]
-            else:
-                self.shot[1] = max(self.shot[1], pz.speed)
-        if self.shot is not None and t - self.shot[0] > 0.25:
-            mph = self.shot[1] * MPH
-            if mph > 12:
-                self.voice.say(f"{mph:.0f}", key="shot")
-                self.shots.append(round(mph, 1))
-                self.log.event(t, "shot", mph=round(mph, 1), ms=round(self.shot[1], 2))
-            self.shot = None
+        """Shots: called from the puck's free flight (shotcall.py), the same way in every replay."""
+        if self.shot is None:                       # a new puck (set to None where one is dropped)
+            self.shot = shotcall.ShotCall()
+        call = self.shot.tick(t, imp, self.play.sim.puck.vel)
+        if call is not None:
+            self.voice.say(f"{call['mph']:.0f}", key="shot")
+            self.shots.append(call["mph"])
+            self.log.event(t, "shot", **call)
 
     def _log_row(self, t: float, imp: float, state: int) -> None:
         sim = self.play.sim

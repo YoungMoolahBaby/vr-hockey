@@ -54,6 +54,9 @@ class Params:
                                  # (Jon's stickhandling, 3v3 2026-11-09: 99% under 3.2 m/s; shots 10+)
     air_k: float = 0.0043        # 1/m: air drag, dv/dt = -air_k v^2 (1/2 rho Cd A / m, Cd ~0.6 side-on: an
                                  # estimate; no measured puck Cd). Equals the ice's friction at ~14 m/s
+    ease_off: float = 1.0        # 1: a blade lifting out of a press eases off the ice through the flex (from rest,
+                                 # no step in its speed); 0: it steps to the hands' speed (before 2026-11-10).
+                                 # physics_core.ease_off; reports/Shot release.md, change 2
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -439,6 +442,7 @@ FAST = True                # Sim.step runs compiled (physics_core.py); False: th
 _NO_EDGE = np.zeros((1, 3))
 _NO_VEC = np.zeros(3)
 _NO_BODY = np.zeros(5)
+_NO_RVEL = np.zeros((0, 3))
 
 
 class Sim:
@@ -472,18 +476,20 @@ class Sim:
 
     def step(self, dt: float, rigid_bot: np.ndarray | None, rigid_top: np.ndarray | None,
              anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4,
-             body=None) -> float:
+             body=None, rvel=None) -> float:
         """Advance dt with the rigid blade edges at the end of the step (None: no stick).
         anchor: the blade point the flex hangs on (world); shaft: unit shaft direction.
         Returns the biggest puck impulse (m/s) this step.
+        rvel: the rigid blade's velocities (rows: the bottom edge's points, the top edge's, the anchor),
+        e.g. fitted over a few ms of samples (sandbox.Physics); None: this step's position difference.
 
         With FAST on this runs compiled (physics_core.py, the same maths, without holding Python's
         lock); step_ref is the Python reference it is tested against."""
         if FAST:
-            return self._step_fast(dt, rigid_bot, rigid_top, anchor, shaft, substeps, body)
-        return self.step_ref(dt, rigid_bot, rigid_top, anchor, shaft, substeps, body)
+            return self._step_fast(dt, rigid_bot, rigid_top, anchor, shaft, substeps, body, rvel)
+        return self.step_ref(dt, rigid_bot, rigid_top, anchor, shaft, substeps, body, rvel)
 
-    def _step_fast(self, dt, rigid_bot, rigid_top, anchor, shaft, substeps, body=None) -> float:
+    def _step_fast(self, dt, rigid_bot, rigid_top, anchor, shaft, substeps, body=None, rvel=None) -> float:
         import physics_core as pc
         p, fl = self.puck, self.flex
         has = rigid_bot is not None
@@ -515,7 +521,7 @@ class Sim:
         pr = p.params
         prm = np.array([pr.ice_mu, pr.blade_pop, pr.puck_mass, pr.blade_grip, pr.blade_thickness,
                         pr.forgiveness, pr.soft_hands, pr.ice_bounce, pr.board_bounce, pr.net_bounce,
-                        pr.magnet, pr.release, pr.air_k])
+                        pr.magnet, pr.release, pr.air_k, pr.ease_off])
         length = getattr(p, "arena_length", None)          # the whole rink (arena.py)
         if zone is None:
             rk = p.rink
@@ -530,7 +536,8 @@ class Sim:
         con, scr = np.zeros(7), np.zeros(2)
         imp = pc.sim_step(dt, substeps, has, rigid_bot, rigid_top, anchor, shaft, lb, lt, la, ss,
                           fx, fv, fs, fk, bend, slide, pos, vel, normal, pf, prm, kind, rkv, ev, nev, con, scr,
-                          _NO_BODY if body is None else np.asarray(body, dtype=float))
+                          _NO_BODY if body is None else np.asarray(body, dtype=float),
+                          _NO_RVEL if rvel is None or not has else np.ascontiguousarray(rvel, dtype=float))
         p.pos, p.vel, p._normal = pos, vel, normal
         p.in_net, p.goals = (int(pf[0]) if kind == 2 else bool(pf[0])), int(pf[1])
         if zone is not None:
@@ -551,7 +558,7 @@ class Sim:
 
     def step_ref(self, dt: float, rigid_bot: np.ndarray | None, rigid_top: np.ndarray | None,
                  anchor: np.ndarray | None = None, shaft: np.ndarray | None = None, substeps: int = 4,
-                 body=None) -> float:
+                 body=None, rvel=None) -> float:
         """The Python reference of step (see step)."""
         p = self.puck
         if rigid_bot is None:
@@ -567,11 +574,16 @@ class Sim:
             self._last = (rigid_bot, rigid_top, anchor)
         b0, t0, a0 = self._last
         h = dt / substeps
-        v_anchor = (anchor - a0) / dt
-        vb_r, vt_r = (rigid_bot - b0) / dt, (rigid_top - t0) / dt
+        va_d = (anchor - a0) / dt                                # this step's position differences
+        vb_d, vt_d = (rigid_bot - b0) / dt, (rigid_top - t0) / dt
+        v_anchor, vb_r, vt_r = va_d, vb_d, vt_d
+        n = len(rigid_bot)
+        if rvel is not None and len(rvel) == 2 * n + 1:          # velocities from a window of samples
+            vb_r, vt_r, v_anchor = np.array(rvel[:n]), np.array(rvel[n:2 * n]), np.array(rvel[2 * n])
         biggest = 0.0
         # the ice's hold (bow + slide) at the last step's end: its rate is part of the blade's velocity
         hold_prev = self.bend - (self.flex.x - a0 if self.flex.x is not None else 0.0) + self.slide
+        sl_prev = np.array(self.slide, dtype=float)
         for k in range(substeps):
             s = (k + 1) / substeps
             a_s = a0 + s * (anchor - a0)
@@ -584,21 +596,37 @@ class Sim:
             v_hold = (hold - hold_prev) / h
             if fresh or float(np.abs(v_hold).max()) > HOLD_JUMP:
                 v_hold, fresh = np.zeros(3), False
+            else:                                            # not the slide's shove along the ice
+                sr = (self.slide - sl_prev) / h
+                v_hold = v_hold - np.array([sr[0], 0.0, sr[2]])
+            sl_prev = np.array(self.slide, dtype=float)
             hold_prev = hold
-            dv_bend = self.flex.v - v_anchor + v_hold
+            low = float((bot_r[:, 1] + own[1]).min())
+            held = low < 0                                   # the ice holds it: this step's differences
+            if held and p.params.ease_off > 0:               # lifting out of a press: ease off the ice
+                import physics_core as pc
+                fl = self.flex
+                fx, fv, hp = np.array(fl.x, dtype=float), np.array(fl.v, dtype=float), np.array(hold_prev, dtype=float)
+                own_c, vh = np.array(own, dtype=float), np.array(v_hold, dtype=float)
+                pc.ease_off.py_func(h, np.asarray(bend, dtype=float), own_c, np.asarray(self.slide, dtype=float), vh, hp,
+                                    fx, fv, np.array([fl.k, fl.c, fl.mass, Flex.MAX_BEND]),
+                                    np.asarray(va_d, dtype=float), np.asarray(shaft, dtype=float))
+                fl.x, fl.v, hold_prev, v_hold = fx, fv, hp, vh
+            dv_bend = self.flex.v - (va_d if held else v_anchor) + v_hold
             bot = bot_r + bend + self.slide
             top = t0 + s * (rigid_top - t0) + bend + self.slide
             p._integrate(h)
             mid = bot.mean(axis=0)
             if np.linalg.norm((mid - p.pos)[[0, 2]]) < 0.4:
-                c = p._collide_blade(bot, top, vb_r + dv_bend, vt_r + dv_bend, self.flex.mass)
+                vb_c, vt_c = (vb_d, vt_d) if held else (vb_r, vt_r)
+                c = p._collide_blade(bot, top, vb_c + dv_bend, vt_c + dv_bend, self.flex.mass)
                 if c is not None and c.impulse > 0:
                     biggest = max(biggest, c.impulse)
                     self.flex.v = self.flex.v + c.blade_dv          # the hit bends the blade back
                 pr = p.params
                 if pr.magnet > 0:                                   # soft hands: the same code, uncompiled
                     import physics_core as pc
-                    pc.cradle.py_func(h, p.pos, p.vel, np.asarray(bot, dtype=float), vb_r + dv_bend, pr.magnet,
+                    pc.cradle.py_func(h, p.pos, p.vel, np.asarray(bot, dtype=float), vb_c + dv_bend, pr.magnet,
                                       pr.release, pr.blade_thickness,
                                       _NO_BODY if body is None else np.asarray(body, dtype=float))
             p._rink(h)

@@ -22,7 +22,6 @@ every event.
 | length (heel to top of the shaft) | 0.84 x height = **57.1"** (1.45 m) | `--height`, `--stick-length` |
 | lie | **5**: shaft 45 deg above the ice (each step about 2 deg more upright) | `--lie` |
 | blade | 29 cm heel to toe, 7.5 cm tall, mid-toe curve 1/2" deep (P92-like), mirrored for a right shot | `--shoots` |
-
 | skate height | **off**: the ice is your floor | the "skate height" setting (cm) |
 
 **Your own stick, on skates.** On the ice, skates lift you a few cm, so your hands sit higher over the
@@ -435,6 +434,8 @@ Next: tuning, after the feel research (`../reports/`).
 | `stickmath.py` | rotations and quaternions |
 | `rig.py` | thumbstick locomotion: where the room sits in the world, moved continuously in time so the physics never sees a jump |
 | `replay.py`, `touches.py` | replay a recorded session's hands through the physics; measure every blade-puck touch (does the puck leave faster than the blade?) |
+| `session_replay.py` | replay a whole session (free skate, game or sandbox) through today's physics and check how the puck leaves the blade against `reports/Shot release.md`'s targets: shot speeds, launches, lift-offs after a press. `--set ease_off=0` or `--window 0.004` compare with and without a change |
+| `shotcall.py` | calling a shot's speed from the puck's free flight, the same in the game and every replay |
 | `drill.py` | the drill app (a sandbox mode): lays out the zone, runs reps, draws the skaters and the after-rep map |
 | `retrieval.py` | module 1's logic, without XR: scenarios, the time-to-intercept value model, forecheckers, shoulder-check tracking, scoring, the staircase |
 | `zone.py` | the defensive zone: regulation boards with rounded corners (rims), our net, markings |

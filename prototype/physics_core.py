@@ -33,7 +33,7 @@ EV_ICE, EV_GOAL, EV_POST, EV_BOARDS, EV_NET, EV_CLEARED, EV_NET2 = 1, 2, 3, 4, 5
 EVENT_NAMES = {EV_ICE: "ice", EV_GOAL: "goal", EV_POST: "post", EV_BOARDS: "boards", EV_NET: "net",
                EV_CLEARED: "cleared", EV_NET2: "net2"}
 # prm: ice_mu, blade_pop, puck_mass, blade_grip, blade_thickness, forgiveness, soft_hands, ice_bounce,
-#      board_bounce, net_bounce, magnet, release, air_k
+#      board_bounce, net_bounce, magnet, release, air_k, ease_off
 # pf (puck flags): in_net, goals, cleared, nets
 # rk: origin x, origin z, direction x, direction z (sandbox: fwd; zone, arena: +z up ice), then
 #     sandbox: goal_dist, half_width, back, end; arena: length
@@ -530,12 +530,54 @@ def cradle(h, pos, vel, bot, vb, strength, release, thickness, body):
         vel[2] -= kt * rt * tz
 
 
+_NO_RVEL = np.zeros((0, 3))
+
+
+@njit(cache=True)
+def ease_off(h, bend, own, sl, v_hold, hold_prev, fx, fv, fk, v_anchor, shaft):
+    """Lifting out of a press (Params.ease_off): while the hands rise out of the ice at u (the blade's
+    anchor rising, the hold shrinking), once the whole bend left is no more than c u / k (= 2 zeta u /
+    omega), hand the bow to the flex as spring bend, with the blade where it is and moving as it moves.
+    Its spring then pulls the blade down no harder than its damper drags it up, so it lifts from rest,
+    with no step in its speed (reports/Shot release.md, change 2). Not while the stick slides through the
+    hands, nor when the hands aren't rising (a hit bending the blade into the ice and springing back),
+    and the rest of a press stays energy-free.
+    bend: the total bend (flex + bow); own: the flex's own bend; edits fx, fv and the hold."""
+    for k in range(3):
+        if sl[k] != 0.0:
+            return
+    # the bow's direction: up, across the shaft (ice_rest's). u: the hands' rise along it
+    su = shaft[1]
+    d0, d1, d2 = -su * shaft[0], 1.0 - su * shaft[1], -su * shaft[2]
+    dn = math.sqrt(d0 * d0 + d1 * d1 + d2 * d2)
+    if dn < 0.2:
+        return
+    d0, d1, d2 = d0 / dn, d1 / dn, d2 / dn
+    u = v_anchor[0] * d0 + v_anchor[1] * d1 + v_anchor[2] * d2
+    if u <= 0.0 or v_hold[0] * d0 + v_hold[1] * d1 + v_hold[2] * d2 >= 0.0:
+        return
+    b2 = 0.0
+    for k in range(3):
+        b2 += bend[k] ** 2
+    lim = fk[1] * u / fk[0]
+    if b2 > lim * lim:
+        return
+    for k in range(3):
+        fx[k] += bend[k] - own[k]                     # the flex takes the bow: the blade stays put
+        fv[k] += v_hold[k]                            # ... and keeps its motion
+        own[k] = bend[k]
+        v_hold[k] = 0.0
+        hold_prev[k] = 0.0
+
+
 @njit(cache=True, nogil=True)
 def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
              last_bot, last_top, last_anchor, ss,
              fx, fv, fs, fk, bend_out, slide,
-             pos, vel, normal, pf, prm, kind, rk, ev, nev, con, scr, body):
-    """puck.Sim.step on arrays. ss: has_last, on_ice. Returns the biggest impulse (m/s)."""
+             pos, vel, normal, pf, prm, kind, rk, ev, nev, con, scr, body, rvel):
+    """puck.Sim.step on arrays. ss: has_last, on_ice. rvel: the rigid blade's velocities, rows
+    bottom edge (n), top edge (n), anchor (1), from a short window of samples (Sim.step's rvel), or no
+    rows: then each is the last step's position difference. Returns the biggest impulse (m/s)."""
     nev[0] = 0
     for k in range(7):
         con[k] = 0.0
@@ -555,11 +597,21 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
                 last_top[i, k] = rigid_top[i, k]
         for k in range(3):
             last_anchor[k] = anchor[k]
-    v_anchor = np.empty(3)
+    # the step's own position differences: a blade the ice holds uses these, as its hold's rate is
+    # measured the same way and must cancel the hands' motion exactly; a free blade uses the window's
+    va_d = np.empty(3)
     for k in range(3):
-        v_anchor[k] = (anchor[k] - last_anchor[k]) / dt
-    vb_r = (rigid_bot - last_bot) / dt
-    vt_r = (rigid_top - last_top) / dt
+        va_d[k] = (anchor[k] - last_anchor[k]) / dt
+    vb_d = (rigid_bot - last_bot) / dt
+    vt_d = (rigid_top - last_top) / dt
+    v_anchor = va_d.copy()
+    vb_r = vb_d.copy()
+    vt_r = vt_d.copy()
+    if rvel.shape[0] == 2 * n + 1:
+        vb_r = rvel[:n].copy()
+        vt_r = rvel[n:2 * n].copy()
+        for k in range(3):
+            v_anchor[k] = rvel[2 * n, k]
     sp = 0.0                                             # blade speed along the ice (for the scrape)
     for i in range(n):
         sp += math.sqrt(vb_r[i, 0] ** 2 + vb_r[i, 2] ** 2)
@@ -587,6 +639,7 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
         hold_prev[k] = bend_out[k] - ((fx[k] - last_anchor[k]) if fs[0] else 0.0) + slide[k]
     fresh = ss[0] == 0
     v_hold = np.zeros(3)
+    sl_prev = slide.copy()                               # the slide (up the shaft) at the last step's end
     for k_sub in range(substeps):
         s = (k_sub + 1) / substeps
         for k in range(3):
@@ -623,10 +676,21 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
             for k in range(3):
                 v_hold[k] = 0.0
             fresh = False
+        else:
+            # the slide stands in for hands deeper than a stick can bend: its rate up and down counts
+            # (a pinned blade isn't rising), but not its shove along the ice, which no stick makes
+            # (it kicked pucks to 100+ mph as a deep press unwound under them)
+            v_hold[0] -= (sl[0] - sl_prev[0]) / h
+            v_hold[2] -= (sl[2] - sl_prev[2]) / h
+        for k in range(3):
+            sl_prev[k] = sl[k]
+        held = low < 0                                   # the ice holds the blade this substep
+        if held and fs[0] and prm[13] > 0:
+            ease_off(h, bend, dv_bend, sl, v_hold, hold_prev, fx, fv, fk, va_d, shaft)
         for k in range(3):
             slide[k] = sl[k]
             total_bend[k] = bend[k]
-            dv_bend[k] = fv[k] - v_anchor[k] + v_hold[k]
+            dv_bend[k] = fv[k] - (va_d[k] if held else v_anchor[k]) + v_hold[k]
         for i in range(n):
             for k in range(3):
                 bot[i, k] = bot_r[i, k] + bend[k] + sl[k]
@@ -640,8 +704,8 @@ def sim_step(dt, substeps, has_blade, rigid_bot, rigid_top, anchor, shaft,
         if math.sqrt((mx - pos[0]) ** 2 + (mz - pos[2]) ** 2) < 0.4:
             for i in range(n):
                 for k in range(3):
-                    vbc[i, k] = vb_r[i, k] + dv_bend[k]
-                    vtc[i, k] = vt_r[i, k] + dv_bend[k]
+                    vbc[i, k] = (vb_d[i, k] if held else vb_r[i, k]) + dv_bend[k]
+                    vtc[i, k] = (vt_d[i, k] if held else vt_r[i, k]) + dv_bend[k]
             imp = collide_blade(pos, vel, normal, bot, top, vbc, vtc, fk[2], prm, out_dv, cinfo)
             if imp > 0:
                 con[6] += 1
@@ -681,7 +745,8 @@ def warm() -> float:
                      np.zeros(3), np.zeros(3), np.zeros(1, dtype=np.int64), np.array([1000.0, 10.0, 0.15, 0.15]),
                      np.zeros(3), np.zeros(3), np.array([0.0, H / 2, 0.5]), np.zeros(3), np.array([1.0, 0, 0]),
                      np.zeros(4, dtype=np.int64),
-                     np.array([0.085, 0.3, 0.17, 0.35, 0.012, 0.01, 0.0, 0.2, 0.3, 0.08, 0.7, 4.5, 0.0043]),
+                     np.array([0.085, 0.3, 0.17, 0.35, 0.012, 0.01, 0.0, 0.2, 0.3, 0.08, 0.7, 4.5, 0.0043, 1.0]),
                      kind, np.array([0.0, 0.0, 0.0, -1.0, 46.0 if kind == 2 else 6.0, 6.0, 3.0, 1.5]),
-                     np.zeros((16, 2)), np.zeros(1, dtype=np.int64), np.zeros(7), np.zeros(2), np.zeros(5))
+                     np.zeros((16, 2)), np.zeros(1, dtype=np.int64), np.zeros(7), np.zeros(2), np.zeros(5),
+                     np.zeros((17, 3)) if has else _NO_RVEL)
     return time.perf_counter() - t
