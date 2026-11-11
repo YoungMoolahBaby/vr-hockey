@@ -268,3 +268,40 @@ def test_the_left_trigger_sprints_the_harder_the_faster():
     assert d.top(1.0) == 4.5 and d.top(0.0) == 3.0
     d.sprint_ms = 0.0                                              # off
     assert d.top(1.0) == 3.0
+
+
+def test_skate_height_lifts_the_room_over_the_ice():
+    """Skate height: the room's floor sits that far over the ice, hands and head alike."""
+    r = rig.Rig(0.06)
+    assert r.moved                                         # the sampler must transform even standing still
+    R, p = r.at(T0).pose(np.eye(3), np.array([0.2, 1.0, -0.3]))
+    assert np.allclose(p, [0.2, 1.06, -0.3])
+    assert np.allclose(r.at(T0).point(0.2, 1.0, -0.3), (0.2, 1.06, -0.3))
+    # skating and turning don't lose it, nor does a teleport
+    t = drive_frames(r, 30, np.array([2.0, 0.0, 0.0]), 0.5, np.array([0.0, 1.5, 0.0]))
+    assert r.at(t).off[1] == pytest.approx(0.06)
+    r.teleport(t, 0.3, np.array([5.0, 0.0, 2.0]))
+    assert r.at(t + 0.1).off[1] == pytest.approx(0.06)
+    m = r.at(t + 0.1)                                      # and the view undoes it
+    assert np.allclose(m.inverse() @ np.r_[m.point(0.1, 1.2, 0.4), 1.0], [0.1, 1.2, 0.4, 1.0])
+
+
+def test_changing_skate_height_eases_in_without_a_jump():
+    r = rig.Rig()
+    assert not r.moved and r.at(T0).off[1] == 0.0
+    r.set_lift(T0, 0.06)
+    assert r.moved
+    ts = T0 + np.arange(0, 0.7, 0.001)
+    ys = np.array([r.at(t).off[1] for t in ts])
+    assert ys[0] == pytest.approx(0.0) and ys[-1] == pytest.approx(0.06)
+    assert np.max(np.abs(np.diff(ys))) < 0.0003             # < 0.3 mm a ms: the physics sees no jump
+    assert np.all(np.diff(ys) >= -1e-12)
+    # the reported velocity is the rate of change (the physics' soft hands read it)
+    k = 250
+    rate = (ys[k + 1] - ys[k - 1]) / 0.002
+    assert r.at(ts[k]).vel[1] == pytest.approx(rate, rel=0.02)
+    # a sample from before the change (the physics reads behind the frames) is still the old height
+    assert r.at(T0 - 0.05).off[1] == 0.0
+    # changing again mid-way starts from where it is
+    r.set_lift(T0 + 0.25, 0.0)
+    assert r.at(T0 + 0.25).off[1] == pytest.approx(ys[250], abs=1e-9)

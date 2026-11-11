@@ -25,7 +25,8 @@ Controls
 
 Settings: stick length, lie, curve depth, face open, flex, forgiveness (extra reach for catching
 the puck), puck weight, ice friction, blade pop, blade grip, buzz strength, soft hands (off here; the 3v3 turns it on) and its shot
-release speed, skate speed, snap turn (degrees; 0 = smooth), smooth turn speed, comfort vignette,
+release speed, skate speed, snap turn (degrees; 0 = smooth), skate height (the ice below your floor,
+as under your feet on skates; 0 = off), smooth turn speed, comfort vignette,
 ice assist (a blade within this many cm of the ice rests on it: you can't feel the ice; 0 = off).
 
 The puck physics (puck.py) runs at 1 kHz, four substeps per controller sample, with the blade
@@ -102,6 +103,10 @@ HANDLE = 1.5             # the stick's damping (Flex.damping) while you stickhan
                          # 11% at 0.6 and 0% at 1.5; a 1.5 m/s tap sends the puck off at 98% of the blade's speed
                          # at 0.6 and 87% at 1.5; a wrist shot is ~5% slower at 1.5. Blade pop changes none of
                          # these. 0 = off: always the shooting hands, as before ("stickhandling hands")
+SKATES = 0.0             # cm: skate height ("skate height"): the ice sits this far below your floor, as it does
+                         # under your feet on skates (rig.Rig.lift), so a stick of your real length fits your hands
+                         # and you see the ice from your height on skates. Measure it: your height in skates minus
+                         # barefoot (no reliable published figure; blogs say 1-3 inches). 0 = off: the ice is your floor
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The physics could sample the hands at the frames' display time (record.Sampler.predict), so it moves
@@ -156,6 +161,7 @@ SETTINGS = (
     Setting("back", "backward speed", 0.1, 0.3, 1.0, "{:.0%} of forward"),
     Setting("side", "sideways speed", 0.1, 0.3, 1.0, "{:.0%} of forward"),
     Setting("snap", "snap turn", 15, 0, 90, "{:.0f} degrees"),
+    Setting("skates", "skate height", 1, 0, 12, "{:.0f} centimetres", "off"),   # the ice below your floor (SKATES)
     Setting("turn", "smooth turn speed", 15, 45, 360, "{:.0f} degrees per second"),
     Setting("vignette", "comfort vignette", 0.1, 0.0, 1.0, "{:.1f}"),
     Setting("grid", "ice grid", 1, 0, 1, "on", "off"),
@@ -199,7 +205,7 @@ class Tuning:
                 "air": params.air_k * 1000, "boards": params.board_bounce, "hands": pk.Flex.DAMPING, "handle": HANDLE,
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "sprint": SPRINT, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
-                "push": PUSH, "glide": GLIDE, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
+                "push": PUSH, "glide": GLIDE, "skates": SKATES, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
                 "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "aa": AA, "check": COMFORT_CHECK_MIN,
                 "ice": pk.ICE_ASSIST * 100}
 
@@ -279,7 +285,8 @@ class Play:
         self.fitting = False                   # Y: the stick held in the right hand while you fit it
         self.sounds: queue.SimpleQueue = queue.SimpleQueue()   # sounds by name (go, whistle, a hit)
         self.bus = Bus()                       # every contact, from the physics: the sound and buzz play from it
-        self.rig = rig.Rig()                   # where the room sits in the world: the thumbsticks move it
+        self.rig = rig.Rig(tuning.values.get("skates", 0.0) / 100)   # where the room sits in the world: the
+                                               # thumbsticks move it; your skate height lifts it over the ice
         self.want_teleport = None              # (world point, world direction): put your head there, facing that way
         self.ahead_ns = 0.0                    # how far ahead of now the frames are displayed (the physics samples there)
 
@@ -1093,6 +1100,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 # turns you about your head (not while fitting: it fits the stick then)
                 lx, ly = inp["lthumb"]
                 tv = play.tuning.values
+                play.rig.set_lift(t_disp * 1e-9, tv.get("skates", 0.0) / 100)   # skate height, eased in when changed
                 play.tuning.drive(drive)
                 rx = 0.0 if play.fitting else inp["thumb"][0]
                 pivot = play.head[1] if play.head is not None else rp.off

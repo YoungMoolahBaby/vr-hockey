@@ -68,12 +68,39 @@ class Pose:
 
 class Rig:
     KEEP = 32                     # segments kept: about 0.4 s at 90 Hz, far more than the physics lags
+    LIFT_S = 0.5                  # s: a change of skate height eases in over this long (never a jump)
 
-    def __init__(self):
+    def __init__(self, lift: float = 0.0):
         zero = np.zeros(3)
         # (t0, yaw0, offset0, velocity, turn rate, pivot): replaced whole, so a reader needs no lock
         self._segs: tuple = ((0.0, 0.0, zero, zero, 0.0, zero),)
-        self.moved = False        # still where the room is: nothing to transform
+        # skate height: the room's floor sits this far above the ice, as your feet do on skates, so
+        # you hold a stick of your real length and see the ice from your height on skates.
+        # (t0, from, to), replaced whole like the segments; it eases from -> to over LIFT_S
+        self._lift: tuple = (0.0, float(lift), float(lift))
+        self.moved = bool(lift)   # still where the room is: nothing to transform
+
+    @property
+    def lift(self) -> float:
+        """The skate height asked for (m), where the room is going."""
+        return self._lift[2]
+
+    def _lift_at(self, t: float) -> tuple[float, float]:
+        """The room's height over the ice at t, and how fast it's changing (m, m/s)."""
+        t0, a, b = self._lift
+        if a == b or t >= t0 + self.LIFT_S:
+            return b, 0.0
+        u = max(t - t0, 0.0) / self.LIFT_S
+        return a + (b - a) * (3 * u * u - 2 * u * u * u), (b - a) * 6 * u * (1 - u) / self.LIFT_S
+
+    def set_lift(self, t: float, lift: float) -> None:
+        """From time t, raise (or lower) the room to `lift` m over the ice, eased over LIFT_S."""
+        lift = float(lift)
+        if lift == self._lift[2]:
+            return
+        now, _ = self._lift_at(t)
+        self._lift = (t, now, lift)
+        self.moved = True
 
     @staticmethod
     def _at(seg, t: float) -> tuple[float, np.ndarray]:
@@ -98,7 +125,13 @@ class Rig:
     def at(self, t: float) -> Pose:
         seg = self._seg(t)
         yaw, off = self._at(seg, t)
-        return Pose(yaw, off, seg[3], seg[4], seg[5] + seg[3] * (t - seg[0]))   # the pivot slides along
+        lift, rate = self._lift_at(t)
+        vel = seg[3]
+        if lift:
+            off = off + np.array([0.0, lift, 0.0])
+        if rate:
+            vel = vel + np.array([0.0, rate, 0.0])
+        return Pose(yaw, off, vel, seg[4], seg[5] + seg[3] * (t - seg[0]))   # the pivot slides along
 
     def drive(self, t: float, vel, omega: float, pivot) -> None:
         """From time t on, slide at vel (world m/s) and turn at omega (rad/s, + = left) about pivot."""

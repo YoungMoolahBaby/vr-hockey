@@ -23,6 +23,16 @@ every event.
 | lie | **5**: shaft 45 deg above the ice (each step about 2 deg more upright) | `--lie` |
 | blade | 29 cm heel to toe, 7.5 cm tall, mid-toe curve 1/2" deep (P92-like), mirrored for a right shot | `--shoots` |
 
+| skate height | **off**: the ice is your floor | the "skate height" setting (cm) |
+
+**Your own stick, on skates.** On the ice, skates lift you a few cm, so your hands sit higher over the
+ice than they do in the headset standing on your floor. Set "skate height" to your height in skates
+minus your height barefoot and the ice drops that far below your floor (eased in over half a second).
+Then set the stick length to your real stick's, and you also see the ice from your height on skates.
+With it off, a stick a few inches shorter than your own fits instead: about 1.4x the skate height
+shorter at lie 5 (6 cm of skates: 8.5 cm, 3.3"). Jon's stick reaches his nose barefoot (about 62"); his saved
+length is 58.5" with skate height off.
+
 Sources:
 - [CCM size chart](https://www.scheels.com/size-chart/ccm-hockey-sticks-size-chart): a 57" stick for 5'2"-5'10".
 - [Bauer size chart](https://www.scheels.com/size-chart/bauer-hockey-sticks-size-chart): measures from the heel's contact point to the top of the shaft.
