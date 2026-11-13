@@ -1,0 +1,93 @@
+{
+ "files": 4,
+ "game_min": 37.9,
+ "skater_min": 227.3,
+ "vmax": 2.8499999999999996,
+ "skate": {
+  "mean_speed_over_top": 0.85,
+  "time_ge_90pct_top": 0.66,
+  "time_ge_98pct_top": 0.605,
+  "time_under_60pct_top": 0.163,
+  "time_standing_lt_0.3": 0.021,
+  "backward_gt120deg_moving": 0.0036,
+  "ticks_on_accel_cap": 0.372,
+  "cap_flips_per_skmin": 27.5,
+  "jerk_p99": 424,
+  "hard_acc_per_skmin": 12.1,
+  "hard_dec_per_skmin": 12.0,
+  "facing_rate_p99_deg_s": 517,
+  "shoves_per_skmin": 25.6,
+  "target_jumps_per_skmin": 33.3,
+  "target_jumps_settled_per_skmin": 25.5
+ },
+ "possession": {
+  "holder_changes_per_game_min": 37.1,
+  "spells_under_0.3s": 0.255,
+  "ai_touch_mean_s": 1.08,
+  "ai_touch_median_s": 0.71,
+  "touches_per_game_min": 18.2,
+  "touch_ends": {
+   "pass": 0.565,
+   "lost:poke": 0.302,
+   "shot": 0.132,
+   "lost:knocked": 0.001
+  },
+  "losses_per_carry_s": 0.275,
+  "poke_losses_per_carry_s": 0.274,
+  "touches_with_1s_away_from_net": 0,
+  "touches_n": 689
+ },
+ "passing": {
+  "n": 387,
+  "per_game_min": 10.22,
+  "outcomes": {
+   "same": 0.509,
+   "picked": 0.452,
+   "keeper": 0.018,
+   "team": 0.021
+  },
+  "completion": 0.509,
+  "picked_after_receiver_missed_roll": 73,
+  "picked": 175,
+  "passes_with_a_missed_roll": 119,
+  "over_90deg_from_facing": 0.525,
+  "opp_within_1m": 0.558,
+  "opp_within_1.6m": 0.889,
+  "length_median_m": 7.7,
+  "hold_before_pass_median": 0.61
+ },
+ "release": {
+  "min_release_s": 0.161,
+  "under_0.3s": 0.266,
+  "shots": 91,
+  "shots_within_0.5s_of_pass": 14,
+  "share_quick_shots": 0.154,
+  "shots_per_game_min": 2.4
+ },
+ "defence": {
+  "nearest_def_body_median_m": 1.57,
+  "nearest_def_body_p10_p90": [
+   0.9,
+   4.73
+  ],
+  "def_stick_in_poke_range": 0.478,
+  "mark_changes_settled_per_def_min": 4.38,
+  "mark_changes_after_flip_total": 427,
+  "mark_changes_settled_total": 446,
+  "mark_changes_settled_per_skater_per_game_min": 1.96,
+  "mark_changes_after_flip_per_skater_per_game_min": 1.88,
+  "chaser_changes_per_team_loose_min": 3.54,
+  "chaser_back_within_1s": 0.282
+ },
+ "support": {
+  "carrier_time_no_open_mate": 0.236
+ },
+ "person": {
+  "role_react_n": 8002,
+  "role_react_within_1_tick": 0.231,
+  "role_react_median_s": 0.305,
+  "puck_behind_off_puck": 0.156
+ },
+ "carry_speed_p90_over_carry_top": 1.0,
+ "goals_per_game_min": null
+}
