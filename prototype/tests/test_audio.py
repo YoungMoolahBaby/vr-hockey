@@ -86,3 +86,18 @@ def test_variants_differ_but_stay_the_same_sound(kind):
     assert all(np.max(np.abs(v)) == pytest.approx(1.0, abs=1e-6) for v in vs)
     if len(vs) > 1:
         assert len({len(v) for v in vs}) > 1 or not np.allclose(vs[0], vs[1])
+
+
+def test_a_spoken_line_plays_whole_on_the_mixer_and_a_pile_of_hits_cant_drop_it():
+    mx = audio.Mixer(Bus())
+    line = (0.5 * np.sin(2 * np.pi * 220 * np.arange(int(1.5 * audio.RATE)) / audio.RATE)).astype(np.float32)
+    mx.speak(line)
+    hits = [(100.0 + 0.2 + 0.005 * i, Contact(kind="puck", t=100.0 + 0.2 + 0.005 * i, speed=8.0)) for i in range(40)]
+    n = int(1.6 * audio.RATE / audio.BLOCK) + 1
+    out = run_blocks(mx, n, hits)
+    assert np.abs(out[:2 * audio.BLOCK]).max() > 0.1              # starts at once
+    assert mx.stats["dropped"] > 0                                # the hits did overflow the voices...
+    played = out
+    tail = played[int(1.0 * audio.RATE):int(1.45 * audio.RATE)]   # ...but the line is still there at the end
+    assert np.abs(tail).max() > 0.2
+    assert np.abs(played[int(1.55 * audio.RATE):]).max() < 0.05   # and then it's over

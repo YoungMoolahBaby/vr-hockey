@@ -131,15 +131,17 @@ Your stick, a puck and a net, laid out in front of you. Play, and tune everythin
   hands"), the harder the firmer.
 - **Right stick left/right:** turn you, about your head (not while fitting), smoothly. Set "snap
   turn" (e.g. 30 degrees) to turn in steps instead, one per flick.
-- **Click the left stick (a quick press):** switch the left stick to tuning, and back:
-  - **Left/right:** pick a setting. The voice says which, and its value.
-  - **Up/down:** change it (hold to keep changing).
 - **X:** a new puck, on your blade.
-- **Y:** fit the stick in your hand. The right stick turns and tilts it; hold B and push to swing
-  it; A saves the fit; Y again leaves without saving.
 - **Hold the left stick in (1 s):** put the net straight in front of you again.
-- **B:** say the current setting again.
-- **A:** save the settings (`sandbox_settings.json`, used by the drills too).
+- **Menu button (left controller, three lines):** the settings menu, in and out. Nothing outside
+  it changes or saves a setting, so nothing changes by accident while you play (Jon asked,
+  2026-11-13). The left stick stops skating you while it's open. In the menu:
+  - **Left stick left/right:** pick a setting. The voice says which, and its value.
+  - **Left stick up/down:** change it (hold to keep changing). It takes effect at once.
+  - **B:** say the current setting again.
+  - **A:** save the settings (`sandbox_settings.json`, used by the drills and the game too).
+  - **Y:** fit the stick in your hand. The right stick turns and tilts it; hold B and push to
+    swing it; A saves the fit; Y again (or closing the menu) leaves without saving.
 
 Moving needs no play space: stand or sit, and skate with the stick.
 - **Sliding** is continuous in time, so the 1 kHz physics sees your blade glide.
@@ -226,7 +228,9 @@ get a line for each blade, as before. `gear.KIND = "ice"` puts them on the ice s
 **What you hear and feel:**
 - **Sounds:** a tap when the blade lands, a dull "thock" off the puck, a ping off the posts, a
   thud off the boards. Every contact gets its own sound, from the contact bus (`contacts.py`),
-  mixed (`audio.py`) straight to the headset's Link audio.
+  mixed (`audio.py`) straight to the headset's Link audio. The voice plays there too, rendered to
+  samples and mixed in (Windows' default output can be a monitor with headphones on a cable too
+  short to play in; Jon missed every comfort check that way, 2026-11-13).
   - About 23 ms after the contact, the same every time.
   - Up to 16 at once, 5 variants of each, and louder for harder hits.
   - `--audio-device` picks another output; with no device it falls back to winsound.
@@ -335,8 +339,8 @@ with the thumbsticks:
   so go round him or shoot.
 - Soft hands are off, as in the game.
 - Shot speeds and goals are called out, and after a goal a puck comes back to your stick.
-- The buttons do what they do in the sandbox: X puts a puck on your stick, B says the setting,
-  and A saves the settings. That includes the comfort ones, and the game uses them too.
+- The buttons do what they do in the sandbox: X puts a puck on your stick, and the menu button
+  opens the settings (A in the menu saves them, the comfort ones too, and the game uses them).
 
 You and two AI teammates (blue) against three (orange), with a goalie in each net, on a whole rink:
 - **The rink** (`arena.py`): regulation width, corners and nets, 46 m long (regulation is 61:

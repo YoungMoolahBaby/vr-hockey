@@ -29,6 +29,7 @@ BLOCK = 256              # 5.3 ms at 48 kHz
 MAX_VOICES = 16
 VARIANTS = 5
 MASTER = 0.7
+SPEECH = 1.2             # the voice's gain: over the game's sounds, short of the limiter's knee
 KINDS = ("tap", "clack", "ping", "thud", "go", "whistle")
 
 
@@ -70,6 +71,7 @@ class Mixer:
         self.rng = np.random.default_rng()
         self.q = bus.subscribe() if bus is not None else collections.deque()
         self.ui: collections.deque = collections.deque()             # (name, strength, perf time)
+        self.speech: collections.deque = collections.deque()         # spoken lines (record.Voice)
         self.pending: list = []                                       # (stream time, clip, gain)
         self.voices: list = []                                        # [clip, position, gain]
         self.delay = 0.0                                              # contact -> DAC, kept constant
@@ -123,6 +125,11 @@ class Mixer:
         """A sound by name (the drills' go and whistle, a hit), now or at perf time t."""
         self.ui.append((name, float(strength), time.perf_counter() if t is None else t))
 
+    def speak(self, clip: np.ndarray) -> None:
+        """A spoken line (float32 samples at our rate, from record.Voice): played from the next
+        block, on the headset with the game's sounds."""
+        self.speech.append(np.asarray(clip, dtype=np.float32))
+
     def _callback(self, outdata, frames, time_info, status) -> None:
         if status.output_underflow:
             self.stats["underruns"] += 1
@@ -151,6 +158,8 @@ class Mixer:
         while self.ui:                                                 # by name
             name, strength, t = self.ui.popleft()
             self._schedule(t + to_stream + self.delay, name, 0.35 + 0.65 * min(max(strength, 0.0), 1.0))
+        while self.speech:                                             # the voice: now, never dropped
+            self.voices.append([self.speech.popleft(), 0, SPEECH])
         out = np.zeros(frames, dtype=np.float32)
         keep = []
         for item in sorted(self.pending, key=lambda x: x[0]):
@@ -188,8 +197,8 @@ class Mixer:
         self.stats["played"] += 1
 
     def _voice(self, clip, gain, pos) -> None:
-        if len(self.voices) >= MAX_VOICES:                             # drop the quietest
-            i = min(range(len(self.voices)), key=lambda k: self.voices[k][2])
+        if len(self.voices) >= MAX_VOICES:                             # drop the quietest (never speech)
+            i = min(range(len(self.voices)), key=lambda k: self.voices[k][2] + 9 * (len(self.voices[k][0]) > self.rate))
             if self.voices[i][2] >= gain:
                 self.stats["dropped"] += 1
                 return

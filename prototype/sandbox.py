@@ -12,16 +12,17 @@ Controls
   right thumbstick left/right   turn you, about your head: smoothly, or in steps per flick (the
                                 "snap turn" setting, degrees; 0 = smooth). The view's edges darken
                                 while you move ("comfort vignette")
-  click the left thumbstick     (a quick press) switch it to tuning, and back:
-    left/right                  pick a setting (the voice says which, and its value)
-    up/down                     change it (hold to keep changing)
   X                             a new puck, on your blade
-  Y                             fit the stick in your hand: right thumbstick turns the blade
+  hold the left thumbstick in   (1 s) put the net straight in front of you again
+  menu button (left controller) the settings menu, in and out. Nothing changes a setting outside it
+                                (Jon, 2026-11-13: none changed by accident while playing). In it:
+    left stick left/right       pick a setting (the voice says which, and its value)
+    left stick up/down          change it (hold to keep changing); it takes effect at once
+    B                           say the current setting again
+    A                           save the settings (sandbox_settings.json, used next time)
+    Y                           fit the stick in your hand: right thumbstick turns the blade
                                 (left/right) and tilts the stick (up/down); hold B and push to
                                 swing it sideways; A saves the fit (Y again leaves without saving)
-  hold the left thumbstick in   (1 s) put the net straight in front of you again
-  B                             say the current setting again
-  A                             save the settings (sandbox_settings.json, used next time)
 
 Settings: stick length, lie, curve depth, face open, flex, forgiveness (extra reach for catching
 the puck), puck weight, ice friction, blade pop, blade grip, buzz strength, soft hands (off here; the 3v3 turns it on) and its shot
@@ -790,6 +791,15 @@ def draw_puck(line, puck) -> None:
         line(ring[k] + P - [0, pk.H / 2, 0], ring[k] + P + [0, pk.H / 2, 0], theme.PUCK_EDGE)
 
 
+def save_settings(play: Play, voice, log, t_sim: float) -> None:
+    """A in the settings menu: every setting and the stick's fit, used next time (and by the game)."""
+    tu = play.tuning
+    SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
+    play.fit.save(record.FIT_PATH, play.spec)
+    voice.say("Saved.", key="saved")
+    log.event(t_sim, "saved", values=dict(tu.values))
+
+
 class MyFeet:
     """Where your own skates go, from your head alone (nothing tracks your feet): under your neck,
     about hip width apart, toes turned out a little. Your feet stay put while your head leans and
@@ -1039,8 +1049,7 @@ class SandboxMode:
 
     def intro(self) -> str:
         return ("Sandbox. Squeeze the grips to hold the stick. Left stick moves you, right stick turns you. "
-                "Click the left stick to tune the settings instead. X gives you a new puck. "
-                "Y fits the stick in your hand.")
+                "X gives you a new puck. The menu button on your left controller opens the settings.")
 
     def first_head(self) -> None:
         self.play.want_recenter = True
@@ -1050,17 +1059,9 @@ class SandboxMode:
         self.voice.say("Net in front of you.", key="rink")
 
     def button(self, name: str, t_sim: float) -> None:
-        """X, A or B pressed (A and B only while not fitting the stick)."""
-        pl, tu = self.play, self.play.tuning
+        """X pressed, or A or B outside the settings menu: X a new puck; A and B nothing here."""
         if name == "x":
-            pl.want_puck = True
-        elif name == "b":
-            self.voice.say(tu.describe(), key="setting")
-        elif name == "a":
-            SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": pl.spec.to_dict()}, indent=2))
-            pl.fit.save(record.FIT_PATH, pl.spec)
-            self.voice.say("Saved.", key="saved")
-            self.log.event(t_sim, "saved", values=dict(tu.values))
+            self.play.want_puck = True
 
     def frame(self, now: float) -> None:
         """Once a frame, in the render thread."""
@@ -1125,6 +1126,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
     sounds = audio.Mixer(play.bus, enabled=not args.no_sound, device=getattr(args, "audio_device", "Oculus"))
     if sounds.start():
         print(f"  audio: mixer on {sounds.device_name} at {sounds.rate} Hz, block {sounds.block}", flush=True)
+        voice.voice.sink, voice.voice.rate = sounds.speak, sounds.rate   # the voice there too, not Windows' default
     else:
         sounds = audio.WinsoundSink(play.bus, not args.no_sound)
     provider = GLFWOffscreenContextProvider()
@@ -1179,8 +1181,10 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
         drive = rig.Drive()
         comfort = Comfort(run_dir / "rig.csv", voice, log)
         snap_ready, tunnel = True, 0.0
-        moving = True                                # the left stick moves you (else it tunes the settings)
-        prev = {"x": False, "a": False, "b": False, "y": False, "lclick": False}
+        menu = False                                 # the settings menu: only the menu button opens it (Jon,
+                                                     # 2026-11-13: no settings changed by accident while playing)
+        moving = True                                # the left stick moves you (in the menu it tunes the settings)
+        prev = {"x": False, "a": False, "b": False, "y": False, "lclick": False, "menu": False}
         last_change, announced = 0.0, True
         click_since, click_done, click_centred = None, False, True
         last_status, away_since = 0.0, None
@@ -1289,7 +1293,21 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 for b in ("a", "b", "y"):                      # the comfort check's answer, if it's asking
                     if inp[b] and not prev[b] and comfort.answer(b, sampler.shared.t_now, tv["check"]):
                         answered = True
-                if inp["y"] and not prev["y"] and not answered:
+                if inp["menu"] and not prev["menu"]:          # the settings menu, in and out
+                    menu = not menu
+                    moving = not menu
+                    if menu:
+                        voice.say(f"Settings. {tu.describe()}. Left stick picks and changes, A saves, "
+                                  "Y fits the stick. The menu button closes.", key="setting")
+                    else:
+                        msg = "Menu closed."
+                        if play.fitting:
+                            play.fitting = False
+                            msg = "Fitting off, not saved. Menu closed."
+                        voice.say(msg, key="setting")
+                    announced = True
+                    log.event(sampler.shared.t_now, "menu", open=menu)
+                if menu and inp["y"] and not prev["y"] and not answered:
                     play.fitting = not play.fitting
                     voice.say("Stick fitting. Right stick turns and tilts it. Hold B and push to swing it. "
                               "A saves." if play.fitting else "Fitting off, not saved.", key="fit")
@@ -1300,8 +1318,7 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                         play.retune()
                 if inp["x"] and not prev["x"]:
                     mode.button("x", sampler.shared.t_now)
-                # the left stick's click, only with the stick centred (pushing it hard clicks it too):
-                # a quick press switches it between moving you and tuning; a 1 s press recenters
+                # holding the left stick in (1 s, centred: pushing it hard clicks it too) recenters
                 if inp["lclick"]:
                     if click_since is None:
                         click_since, click_centred = now, True
@@ -1310,26 +1327,28 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                         click_done = True
                         mode.recenter()
                 else:
-                    if click_since is not None and click_centred and not click_done and now - click_since < 0.5:
-                        moving = not moving
-                        voice.say("Moving. Left stick moves you, right stick turns you." if moving else
-                                  f"Tuning. {tu.describe()}", key="setting")
-                        announced = True
-                        log.event(sampler.shared.t_now, "left_stick", mode="move" if moving else "tune")
                     click_since, click_done = None, False
-                if inp["b"] and not prev["b"] and not play.fitting and not answered:
-                    mode.button("b", sampler.shared.t_now)
-                if inp["a"] and not prev["a"] and play.fitting and not answered:
-                    play.fitting = False
-                    play.fit.save(record.FIT_PATH, play.spec)
-                    SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
-                    f = play.fit
-                    voice.say(f"Fit saved. Turned {f.roll_deg:.0f}, tilted {f.pitch_deg:.0f}, "
-                              f"swung {f.yaw_deg:.0f} degrees.", key="fit")
-                    log.event(sampler.shared.t_now, "fit_saved", **f.to_dict())
-                    inputs.buzz(top_hand_dev, 0.8, 60)
-                elif inp["a"] and not prev["a"] and not answered:
-                    mode.button("a", sampler.shared.t_now)
+                b_down = inp["b"] and not prev["b"] and not answered
+                a_down = inp["a"] and not prev["a"] and not answered
+                if menu:                                       # in the menu: B says the setting, A saves
+                    if b_down and not play.fitting:
+                        voice.say(tu.describe(), key="setting")
+                    if a_down and play.fitting:
+                        play.fitting = False
+                        play.fit.save(record.FIT_PATH, play.spec)
+                        SETTINGS_PATH.write_text(json.dumps({"values": tu.values, "spec": play.spec.to_dict()}, indent=2))
+                        f = play.fit
+                        voice.say(f"Fit saved. Turned {f.roll_deg:.0f}, tilted {f.pitch_deg:.0f}, "
+                                  f"swung {f.yaw_deg:.0f} degrees.", key="fit")
+                        log.event(sampler.shared.t_now, "fit_saved", **f.to_dict())
+                        inputs.buzz(top_hand_dev, 0.8, 60)
+                    elif a_down:
+                        save_settings(play, voice, log, sampler.shared.t_now)
+                else:                                          # playing: the mode's own (start, score, next rep)
+                    if b_down:
+                        mode.button("b", sampler.shared.t_now)
+                    if a_down:
+                        mode.button("a", sampler.shared.t_now)
                 mode.frame(now)
                 for k in prev:
                     prev[k] = inp[k]

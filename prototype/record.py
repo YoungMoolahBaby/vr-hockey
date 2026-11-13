@@ -32,8 +32,10 @@ import ctypes
 import datetime as dt
 import os
 import subprocess
+import tempfile
 import threading
 import time
+import wave
 import winsound
 from ctypes import wintypes
 from pathlib import Path
@@ -64,20 +66,58 @@ RATES_DEG_S = {"roll": 70.0, "pitch": 40.0, "yaw": 40.0}   # at full thumbstick
 
 
 class Voice:
-    """Blocking text-to-speech through Windows' built-in voice, plus beeps."""
+    """Blocking text-to-speech through Windows' built-in voice, plus beeps.
+
+    By itself it speaks on Windows' default output. Give it a sink (audio.Mixer.speak) and it
+    renders each line to a WAV instead and plays it there, on the headset with the game's sounds:
+    Windows' default can be a monitor with headphones on a cable too short to play with (Jon,
+    2026-11-13: the comfort checks went unheard)."""
 
     PS = ("Add-Type -AssemblyName System.Speech; "
           "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Rate = 1; "
           "$s.Speak($env:SPIKE0_SAY)")
+    PS_WAV = ("Add-Type -AssemblyName System.Speech; "
+              "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Rate = 1; "
+              "$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo([int]$env:SPIKE0_RATE, "
+              "[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono); "
+              "$s.SetOutputToWaveFile($env:SPIKE0_WAV, $f); $s.Speak($env:SPIKE0_SAY); $s.Dispose()")
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, sink=None, rate: int = 48000):
         self.enabled = enabled
+        self.sink, self.rate = sink, rate          # sink(samples float32 at rate): plays them
+
+    def render(self, text: str) -> np.ndarray | None:
+        """The line spoken, as float32 samples at self.rate (None if Windows' voice failed)."""
+        fd, wav = tempfile.mkstemp(suffix=".wav", prefix="voice-")
+        os.close(fd)
+        try:
+            env = dict(os.environ, SPIKE0_SAY=text, SPIKE0_WAV=wav, SPIKE0_RATE=str(self.rate))
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", self.PS_WAV],
+                           env=env, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+            with wave.open(wav, "rb") as w:
+                if w.getsampwidth() != 2 or w.getnchannels() != 1 or w.getframerate() != self.rate:
+                    return None
+                pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+            return (pcm.astype(np.float32) / 32768.0) if len(pcm) else None
+        except (OSError, wave.Error, EOFError):
+            return None
+        finally:
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
 
     def say(self, text: str) -> None:
         print(f"[voice] {text}", flush=True)
         if not self.enabled:
             time.sleep(min(4.0, 0.05 * len(text)))
             return
+        if self.sink is not None:
+            clip = self.render(text)
+            if clip is not None:
+                self.sink(clip)
+                time.sleep(len(clip) / self.rate)   # one line at a time, as when it spoke itself
+                return
         env = dict(os.environ, SPIKE0_SAY=text)
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", self.PS],
                        env=env, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -334,7 +374,8 @@ def _run_protocol(shared: Shared, voice: Voice, phases: list[protocol.Phase]) ->
 
 
 class Inputs:
-    """Grip poses, squeeze (grip button), both thumbsticks, A/B/X/Y, both triggers, and haptics."""
+    """Grip poses, squeeze (grip button), both thumbsticks, A/B/X/Y, the left menu button, both
+    triggers, and haptics."""
 
     PROFILE = "/interaction_profiles/oculus/touch_controller"
 
@@ -364,6 +405,7 @@ class Inputs:
         self.y = make("y_button", A.BOOLEAN_INPUT, left)
         self.lthumb = make("left_thumbstick", A.VECTOR2F_INPUT, left)
         self.lclick = make("left_thumbstick_click", A.BOOLEAN_INPUT, left)
+        self.menu = make("menu_button", A.BOOLEAN_INPUT, left)        # the left controller's menu button
         self.ltrigger = make("left_trigger", A.FLOAT_INPUT, left)
         self.rtrigger = make("right_trigger", A.FLOAT_INPUT, right)
         self.haptic = make("haptic", A.VIBRATION_OUTPUT, both)
@@ -375,6 +417,7 @@ class Inputs:
                  (self.x, "/user/hand/left/input/x/click"), (self.y, "/user/hand/left/input/y/click"),
                  (self.lthumb, "/user/hand/left/input/thumbstick"),
                  (self.lclick, "/user/hand/left/input/thumbstick/click"),
+                 (self.menu, "/user/hand/left/input/menu/click"),
                  (self.ltrigger, "/user/hand/left/input/trigger/value"),
                  (self.rtrigger, "/user/hand/right/input/trigger/value"),
                  (self.haptic, "/user/hand/left/output/haptic"), (self.haptic, "/user/hand/right/output/haptic")]
@@ -398,7 +441,8 @@ class Inputs:
     def read(self) -> dict:
         s = self.ctx.session
         out = {"squeeze": {}, "thumb": (0.0, 0.0), "a": False, "b": False,
-               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False, "ltrigger": 0.0, "rtrigger": 0.0}
+               "x": False, "y": False, "lthumb": (0.0, 0.0), "lclick": False, "menu": False,
+               "ltrigger": 0.0, "rtrigger": 0.0}
         try:
             for d in ("l", "r"):
                 st = xr.get_action_state_float(s, self._info(self.squeeze, d))
@@ -412,6 +456,7 @@ class Inputs:
             v = xr.get_action_state_vector2f(s, self._info(self.lthumb, "l"))
             out["lthumb"] = (v.current_state.x, v.current_state.y) if v.is_active else (0.0, 0.0)
             out["lclick"] = bool(xr.get_action_state_boolean(s, self._info(self.lclick, "l")).current_state)
+            out["menu"] = bool(xr.get_action_state_boolean(s, self._info(self.menu, "l")).current_state)
             st = xr.get_action_state_float(s, self._info(self.ltrigger, "l"))
             out["ltrigger"] = float(st.current_state) if st.is_active else 0.0
             st = xr.get_action_state_float(s, self._info(self.rtrigger, "r"))

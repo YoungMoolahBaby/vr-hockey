@@ -9,8 +9,8 @@
 Free skate is the same rink with no skaters but you, to get used to skating with the thumbsticks.
 The goalies save what they get a piece of, cover a slow puck, and pass it back out to you; you
 can't carry it through one (go round him). Its buttons are the sandbox's: X puts a puck on your
-stick (one also comes back after a goal), B says the setting, A saves the settings (the comfort
-ones too: the game uses them).
+stick (one also comes back after a goal); the menu button opens the settings, and A in the menu
+saves them (the comfort ones too: the game uses them).
 
 You start at centre ice, facing the far net: that's the one you attack; your goalie is behind
 you. Press A to drop the puck. Your teammates (blue) pass to you when you're open; the other
@@ -335,7 +335,7 @@ class FreeSkateMode(GameMode):
     def intro(self) -> str:
         who = "a goalie in each net" if self.goalie_ends else "both nets empty"
         return (f"Free skate. You, a puck, and {who}. Left stick skates, left trigger sprints, right "
-                "stick turns. X puts a puck on your stick. Click the left stick to tune the settings, A saves them.")
+                "stick turns. X puts a puck on your stick. The menu button on your left controller opens the settings.")
 
     def place_if_asked(self, t: float, blade_world) -> None:
         if self.want_place is None or self.play.head is None:
