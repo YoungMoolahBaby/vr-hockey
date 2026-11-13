@@ -62,6 +62,7 @@ from xr.utils.gl import ContextObject
 from xr.utils.gl.glfw_util import GLFWOffscreenContextProvider
 from xr.utils.matrix4x4f import GraphicsAPI, Matrix4x4f
 
+import gear
 import grab
 import puck as pk
 import recfmt
@@ -108,6 +109,9 @@ SKATES = 0.0             # cm: skate height ("skate height"): the ice sits this 
                          # under your feet on skates (rig.Rig.lift), so a stick of your real length fits your hands
                          # and you see the ice from your height on skates. Measure it: your height in skates minus
                          # barefoot (no reliable published figure; blogs say 1-3 inches). 0 = off: the ice is your floor
+FEET = 0.0               # your own skates under you ("your skates", gear.py: Jon's roller skates), placed by
+                         # MyFeet from where your head is: off until tried in the headset (legs that move on
+                         # their own could bother a queasy stomach)
 COMFORT_CHECK_MIN = 4.0  # a 0-10 queasiness check this often (Comfort; the "comfort check" setting, 0 = off)
 JUMP_M = 0.2             # m: the blade can't move this far in one physics tick: a snap turn or a teleport
 # The blade's velocity at a contact (reports/Shot release.md, change 1). One sample's pose difference was
@@ -182,6 +186,7 @@ SETTINGS = (
     Setting("turn", "smooth turn speed", 15, 45, 360, "{:.0f} degrees per second"),
     Setting("vignette", "comfort vignette", 0.1, 0.0, 1.0, "{:.1f}"),
     Setting("grid", "ice grid", 1, 0, 1, "on", "off"),
+    Setting("feet", "your skates", 1, 0, 1, "on", "off"),
     Setting("aa", "anti-aliasing", 4, 0, 4, "{:.0f} times", "off"),
     Setting("check", "comfort check", 1, 0, 15, "every {:g} minutes", "off"),   # a 0-10 queasiness check
     Setting("ice", "ice assist", 2, 0, 30, "{:.0f} centimetres"),      # last: one push left from the first
@@ -223,7 +228,7 @@ class Tuning:
                 "buzz": 0.6, "forgive_cm": params.forgiveness * 100, "puck_g": params.puck_mass * 1000,
                 "skate": rig.MOVE_MS, "sprint": SPRINT, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
                 "push": PUSH, "glide": GLIDE, "skates": SKATES, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
-                "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "aa": AA, "check": COMFORT_CHECK_MIN,
+                "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "feet": FEET, "aa": AA, "check": COMFORT_CHECK_MIN,
                 "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
@@ -296,6 +301,8 @@ class Play:
         self.want_puck = False
         self.want_recenter = False
         self.head = None                       # (R, p) of the headset, from the render thread
+        self.feet = MyFeet()                   # where your own skates go (the "your skates" setting)
+        self.my_skates = None                  # their (left, right) 4x4 model -> world this frame, or None
         self.haptics: queue.SimpleQueue = queue.SimpleQueue()
         self.stick_state = grab.NONE
         self.last_focus = time.time()
@@ -662,9 +669,11 @@ WHITE, RED, BLUE = (0.92, 0.92, 0.92), theme.RED, theme.BLUE
 
 
 class Frame(NamedTuple):
-    """What a mode draws: solid triangles (drawn first) and line segments, each row x, y, z, r, g, b."""
+    """What a mode draws: solid triangles (drawn first) and line segments, each row x, y, z, r, g, b,
+    and models placed in the world (gear.Model, instance matrices): Lines.mesh_list()."""
     tris: np.ndarray
     lines: np.ndarray
+    meshes: tuple = ()
 
 
 NO_TRIS = np.zeros((0, 6), dtype=np.float32)
@@ -679,6 +688,16 @@ class Lines:
         self.v: list = []
         self.blocks: list[np.ndarray] = []
         self.tris: list[np.ndarray] = []
+        self.placed: dict = {}                 # id(model) -> (model, [4x4 model -> world])
+
+    def place(self, model, M) -> None:
+        """A model (gear.Model) drawn where the 4x4 M (model -> world) puts it."""
+        self.placed.setdefault(id(model), (model, []))[1].append(M)
+
+    def mesh_list(self) -> tuple:
+        """(model, instances (n, 4, 4) float32, column-major as GL reads them) for Frame.meshes."""
+        return tuple((m, np.ascontiguousarray(np.asarray(Ms, dtype=np.float32).transpose(0, 2, 1)))
+                     for m, Ms in self.placed.values())
 
     def solid(self, P, c) -> None:
         """Triangles: corners P (3n, 3), one colour (3,) or one per corner (3n, 3)."""
@@ -712,7 +731,7 @@ def scene(play: Play, rink: pk.Rink, poses: dict, held: dict, stick, state: int)
     draw_rink(line, rink, grid=play.tuning.values.get("grid", 0) > 0)
     draw_puck(line, play.sim.puck)
     draw_hands_and_stick(line, play, poses, held, stick, state)
-    return Frame(line.tri_array(), line.array())
+    return Frame(line.tri_array(), line.array(), line.mesh_list())
 
 
 def draw_rink(line, rink: pk.Rink, grid: bool = False) -> None:
@@ -771,7 +790,69 @@ def draw_puck(line, puck) -> None:
         line(ring[k] + P - [0, pk.H / 2, 0], ring[k] + P + [0, pk.H / 2, 0], theme.PUCK_EDGE)
 
 
+class MyFeet:
+    """Where your own skates go, from your head alone (nothing tracks your feet): under your neck,
+    about hip width apart, toes turned out a little. Your feet stay put while your head leans and
+    turns; they step after it once it's 25 cm away, and turn with it once it's turned 35 degrees
+    from them (and slowly settle toward where it looks). Kept in the room, so they turn and slide
+    with the thumbsticks exactly, then put on the ice."""
+
+    NECK = 0.09          # m: the neck behind your eyes
+    STANCE = 0.16        # m: each skate out from your middle
+    TOE_OUT = 0.12       # rad: each toe turned out
+    STEP_FROM, STEP_TO, STEP_MS = 0.25, 0.08, 1.5      # m, m, m/s
+    TURN_FREE, SETTLE_S = np.radians(35), 2.0
+
+    def __init__(self):
+        self.c = None                          # room (x, z) between your feet
+        self.yaw = 0.0                         # room heading: forward is (sin yaw, 0, cos yaw)
+        self.stepping = False
+
+    def update(self, R: np.ndarray, p: np.ndarray, rp, dt: float) -> tuple[np.ndarray, np.ndarray]:
+        """Head pose in the room -> the (left, right) skates' 4x4 model -> world."""
+        f = -R[:, 2]                           # where you look (OpenXR: -z forward)
+        h = np.array([f[0], f[2]])
+        n = float(np.linalg.norm(h))
+        neck = np.array([p[0], p[2]])
+        if n > 0.2:                            # not looking straight down or up
+            head_yaw = np.arctan2(h[0], h[1])
+            neck = neck - self.NECK * h / n
+            d = (head_yaw - self.yaw + np.pi) % (2 * np.pi) - np.pi
+            if self.c is None:
+                self.yaw, d = head_yaw, 0.0
+            if abs(d) > self.TURN_FREE:        # turned too far from your feet: they come round
+                self.yaw += d - np.sign(d) * self.TURN_FREE
+                d = np.sign(d) * self.TURN_FREE
+            self.yaw += d * (1 - np.exp(-dt / self.SETTLE_S))
+        if self.c is None:
+            self.c = neck.copy()
+        gap = neck - self.c
+        dist = float(np.linalg.norm(gap))
+        if dist > self.STEP_FROM:
+            self.stepping = True
+        if self.stepping:
+            self.c = self.c + gap * min(1.0, self.STEP_MS * dt / max(dist, 1e-9))
+            self.stepping = dist > self.STEP_TO
+        sy, cy = np.sin(self.yaw), np.cos(self.yaw)
+        fwd, left = np.array([sy, 0.0, cy]), np.array([cy, 0.0, -sy])
+        out = []
+        for k in (1.0, -1.0):                  # left foot, right foot
+            a = k * self.TOE_OUT
+            ff, ll = np.cos(a) * fwd + np.sin(a) * left, np.cos(a) * left - np.sin(a) * fwd
+            Rw, ow = rp.pose(np.stack([ff, ll, [0.0, 1.0, 0.0]], axis=1),
+                             np.array([self.c[0], 0.0, self.c[1]]) + k * self.STANCE * left)
+            ow = ow.copy()
+            ow[1] = 0.0                        # on the ice, whatever the skate height
+            out.append(gear.place(Rw, ow))
+        return out[0], out[1]
+
+
 def draw_hands_and_stick(line, play: Play, poses: dict, held: dict, stick, state: int) -> None:
+    my = play.my_skates
+    skates = gear.skates() if my is not None else None
+    if skates is not None:                     # your own skates (the "your skates" setting)
+        for model, M in zip(skates, my):
+            line.place(model, M)
     # hands
     for dev, (R, p) in poses.items():
         for axis, col in ((0, (1, 0.2, 0.2)), (1, (0.2, 1, 0.2)), (2, (0.3, 0.5, 1))):
@@ -1151,6 +1232,8 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 poses = {dev: rp.pose(*pose) for dev, pose in room.items()}
                 if head_room is not None:
                     play.head = rp.pose(*head_room)
+                    play.my_skates = (play.feet.update(*head_room, rp, dt_frame)
+                                      if play.tuning.values.get("feet", 0) > 0 else None)
                     if not head_seen:
                         head_seen = True
                         mode.first_head()
@@ -1281,9 +1364,11 @@ def run(args, play: Play, run_dir: Path, mode_cls=SandboxMode) -> None:
                 for i, view in enumerate(ctx.view_loop(frame_state)):
                     proj = np.asarray(Matrix4x4f.create_projection_fov(GraphicsAPI.OPENGL, view.fov, 0.05, 100.0).m)
                     sc = ctx.swapchains[i]
+                    ep = view.pose.position
                     renderer.draw(drawn.lines, proj @ record.view_matrix(view.pose) @ world_to_room, theme.SKY,
                                   tris=drawn.tris, target=ctx.graphics.swapchain_framebuffer,
-                                  viewport=(0, 0, sc.width, sc.height))
+                                  viewport=(0, 0, sc.width, sc.height),
+                                  meshes=drawn.meshes, eye=rp.point(ep.x, ep.y, ep.z))
                     if mesh is not None:
                         renderer.tunnel(mesh)
                 w = time.perf_counter() - t_work               # this frame's work, not the wait for the headset

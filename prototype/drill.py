@@ -382,7 +382,8 @@ class DrillMode(sandbox.SandboxMode):
                     self._replay(line, zone, rep)
         sandbox.draw_puck(line, self.play.sim.puck)
         sandbox.draw_hands_and_stick(line, self.play, poses, held, stick, state)
-        return sandbox.Frame(np.vstack([static_tris, line.tri_array()]), np.vstack([static, line.array()]))
+        return sandbox.Frame(np.vstack([static_tris, line.tri_array()]), np.vstack([static, line.array()]),
+                             line.mesh_list())
 
     def _replay(self, line, zone: zn.Zone, rep) -> None:
         """After a rep: the best play and the puck's path on the ice, and a map in front of you

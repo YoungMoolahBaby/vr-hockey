@@ -196,6 +196,19 @@ keys are those in `sandbox_settings.json`):
 - comfort vignette (default 0.7): the view's edges darken while the thumbsticks move you (0 = off)
 - ice grid (`grid`, default off; 1 = on): the old 2 m grid on the ice. A real rink has none, and
   every line sliding by under you is motion your inner ear doesn't feel.
+- your skates (`feet`, default off; 1 = on): Jon's custom roller skates under you, where your feet
+  would be (nothing tracks them): under your neck, hip width apart. They stay put while you lean or
+  glance round, step after you once your head is 25 cm away, come round once it's turned 35°, and
+  slide and turn with the thumbsticks exactly. Off until tried: legs that move on their own could
+  bother a queasy stomach. The skates' wheels put the bottom of your foot 9.3 cm up, so with them on,
+  "skate height" 9 puts the ice where they stand.
+
+**The skates.** Every skater wears Jon's custom roller skate from the custom-skate project next door
+(`gear.py`): its 3D viewer build (`../../custom-skate/out/boot_roller/viewer`, or `VR_HOCKEY_SKATES`
+for another `out` folder), each part cut to a few thousand triangles (about 23,000 a skate), in his
+colourway, cached in `gear_cache/` (not in git: a boot built on his own foot scan carries its shape).
+They turn out and tip onto their inside edges as a skater pushes. Without the build there, skaters
+get a line for each blade, as before. `gear.KIND = "ice"` puts them on the ice skate instead.
 - comfort check (`check`, default every 4 min; 0 = off): the voice asks how you feel. Press A if
   you feel fine, B if you're a bit queasy, Y if you need a break (Y says to take the headset off;
   not X, which is a new puck).

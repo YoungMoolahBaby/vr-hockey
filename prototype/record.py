@@ -468,6 +468,50 @@ out vec4 frag;
 void main() { frag = vec4(0.0, 0.0, 0.0, va); }
 """
 
+# Models (gear.Model: the skates), drawn many times each: one copy per instance matrix. Lit from a
+# light overhead (the rink's ring of light) and from below by the white ice, with a highlight that
+# shows the shape of black carbon. Colours are linear, like everything drawn (theme.srgb).
+MESH_VS = """#version 410
+layout(location = 0) in vec3 pos;
+layout(location = 1) in vec3 nrm;
+layout(location = 2) in vec3 col;
+layout(location = 3) in float shine;
+layout(location = 4) in mat4 model;
+uniform mat4 mvp;
+out vec3 wpos;
+out vec3 wn;
+out vec3 vcol;
+out float vshine;
+void main() {
+    vec4 w = model * vec4(pos, 1.0);
+    wpos = w.xyz;
+    wn = mat3(model) * nrm;
+    vcol = col;
+    vshine = shine;
+    gl_Position = mvp * w;
+}
+"""
+MESH_FS = """#version 410
+in vec3 wpos;
+in vec3 wn;
+in vec3 vcol;
+in float vshine;
+uniform vec3 eye;
+out vec4 frag;
+void main() {
+    vec3 n = normalize(wn);
+    if (!gl_FrontFacing) n = -n;                  // inside a part, seen through an opening
+    vec3 v = normalize(eye - wpos);
+    vec3 l = normalize(vec3(0.3, 1.0, 0.25));
+    float sky = 0.5 + 0.5 * n.y;
+    vec3 amb = vcol * mix(0.55, 0.8, sky);        // the white ice lights things from below too
+    float d = max(dot(n, l), 0.0);
+    float spec = pow(max(dot(n, normalize(l + v)), 0.0), 40.0) * vshine;
+    float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0) * 0.12 * vshine;
+    frag = vec4(amb * 0.6 + vcol * 0.6 * d + vec3(0.45 * spec + rim), 1.0);
+}
+"""
+
 
 def tunnel_mesh(strength: float, n: int = 48) -> np.ndarray:
     """The comfort vignette in clip space: triangles (x, y, alpha), clear in the middle, fading to
@@ -531,6 +575,62 @@ class LineRenderer:
         GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 12, ctypes.c_void_p(0))
         GL.glBindVertexArray(0)
         self._tunnel = None
+        # models (the skates): uploaded once each, then only their instance matrices every frame
+        self.mprog = GL.glCreateProgram()
+        for src, kind in ((MESH_VS, GL.GL_VERTEX_SHADER), (MESH_FS, GL.GL_FRAGMENT_SHADER)):
+            GL.glAttachShader(self.mprog, _compile(src, kind))
+        GL.glLinkProgram(self.mprog)
+        if not GL.glGetProgramiv(self.mprog, GL.GL_LINK_STATUS):
+            raise RuntimeError(GL.glGetProgramInfoLog(self.mprog).decode())
+        self.m_mvp = GL.glGetUniformLocation(self.mprog, "mvp")
+        self.m_eye = GL.glGetUniformLocation(self.mprog, "eye")
+        self._models: dict = {}                          # id(model) -> (model, vao, index count, instance vbo)
+        self._inst: dict = {}                            # id(model) -> the instances uploaded last
+
+    def _model(self, model):
+        """A gear.Model's buffers on the GPU (made on first use; models live as long as the program)."""
+        got = self._models.get(id(model))
+        if got is not None and got[0] is model:
+            return got
+        vao = GL.glGenVertexArrays(1)
+        vbo, ibo, ivbo = GL.glGenBuffers(3)
+        GL.glBindVertexArray(vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
+        v = np.ascontiguousarray(model.vertices, dtype=np.float32)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, v.nbytes, v, GL.GL_STATIC_DRAW)
+        for loc, n, off in ((0, 3, 0), (1, 3, 12), (2, 3, 24), (3, 1, 36)):     # pos, normal, colour, shine
+            GL.glEnableVertexAttribArray(loc)
+            GL.glVertexAttribPointer(loc, n, GL.GL_FLOAT, GL.GL_FALSE, 40, ctypes.c_void_p(off))
+        GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, ibo)
+        idx = np.ascontiguousarray(model.index, dtype=np.uint32)
+        GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, idx.nbytes, idx, GL.GL_STATIC_DRAW)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, ivbo)
+        for k in range(4):                               # the instance matrix, a column per slot
+            GL.glEnableVertexAttribArray(4 + k)
+            GL.glVertexAttribPointer(4 + k, 4, GL.GL_FLOAT, GL.GL_FALSE, 64, ctypes.c_void_p(16 * k))
+            GL.glVertexAttribDivisor(4 + k, 1)
+        GL.glBindVertexArray(0)
+        got = (model, vao, idx.size, ivbo)
+        self._models[id(model)] = got
+        return got
+
+    def _draw_models(self, meshes, mvp32, eye) -> None:
+        """meshes: (model, instances) pairs, instances (n, 4, 4) float32 model -> world, column-major."""
+        GL.glUseProgram(self.mprog)
+        GL.glUniformMatrix4fv(self.m_mvp, 1, GL.GL_TRUE, mvp32)
+        GL.glUniform3f(self.m_eye, *(float(c) for c in (eye if eye is not None else (0.0, 10.0, 0.0))))
+        for model, inst in meshes:
+            if not len(inst):
+                continue
+            _, vao, count, ivbo = self._model(model)
+            GL.glBindVertexArray(vao)
+            if self._inst.get(id(model)) is not inst:     # the same frame's second eye: already there
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, ivbo)
+                GL.glBufferData(GL.GL_ARRAY_BUFFER, inst.nbytes, inst, GL.GL_DYNAMIC_DRAW)
+                self._inst[id(model)] = inst
+            GL.glDrawElementsInstanced(GL.GL_TRIANGLES, count, GL.GL_UNSIGNED_INT, ctypes.c_void_p(0), len(inst))
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(self.prog)
 
     @staticmethod
     def _buffers():
@@ -592,8 +692,10 @@ class LineRenderer:
         GL.glEnable(GL.GL_DEPTH_TEST)
 
     def draw(self, verts: np.ndarray, mvp: np.ndarray, clear, tris: np.ndarray | None = None,
-             target: int | None = None, viewport: tuple[int, int, int, int] | None = None) -> None:
-        """Clear, then the triangles (solid surfaces), then the lines, into the target framebuffer's
+             target: int | None = None, viewport: tuple[int, int, int, int] | None = None,
+             meshes=(), eye=None) -> None:
+        """Clear, then the triangles (solid surfaces) and models (meshes: (gear.Model, instances)
+        pairs, lit as seen from eye, a world point), then the lines, into the target framebuffer's
         viewport (by way of the multisampled one, resolved into it at the end). Pass target and
         viewport when they're known (the headset's): asking GL for them makes the CPU wait for the
         driver; left out, they're the bound framebuffer and the current viewport."""
@@ -611,7 +713,8 @@ class LineRenderer:
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glUseProgram(self.prog)
-        GL.glUniformMatrix4fv(self.mvp_loc, 1, GL.GL_TRUE, np.ascontiguousarray(mvp, dtype=np.float32))
+        mvp32 = np.ascontiguousarray(mvp, dtype=np.float32)
+        GL.glUniformMatrix4fv(self.mvp_loc, 1, GL.GL_TRUE, mvp32)
         if tris is not None and len(tris):
             GL.glBindVertexArray(self.tri_vao)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.tri_vbo)
@@ -619,6 +722,8 @@ class LineRenderer:
                 GL.glBufferData(GL.GL_ARRAY_BUFFER, tris.nbytes, tris, GL.GL_DYNAMIC_DRAW)
                 self._tris = tris
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(tris))
+        if meshes:
+            self._draw_models(meshes, mvp32, eye)
         GL.glBindVertexArray(self.vao)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
         if verts is not self._uploaded:
