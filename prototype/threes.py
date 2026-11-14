@@ -17,8 +17,10 @@ both against reports/Lifelike AI players.md.
 
 The AI, 50 times a second:
 - possession: the puck is carried (by an AI skater, or by you: near your blade and slow), loose,
-  or frozen by a goalie. A loose puck at an AI stick is his (a hard one only sometimes); a
-  defender at the carrier pokes it loose now and then; a hard puck into a body is blocked.
+  or frozen by a goalie. A loose puck at an AI stick is his to catch, by how fast it comes
+  (catch_chance: sure to 6 m/s, half at 12, a tenth at 18; less from the side or mid-turn); a miss
+  is a bobble, slowed and knocked off line. A defender at the carrier pokes it loose now and then;
+  a hard puck into a body is blocked.
 - the carrier skates for the slot, away from defenders. Every quarter second or so he shoots (the
   goal chance from goalie.py, against the real goalie), passes (to the most dangerous open
   teammate, you included, if the lane is clear) or keeps going.
@@ -75,7 +77,13 @@ STICK_R = 0.75           # m: how far ahead of him a skater's stick reaches a lo
 BLADE_AT = (0.94, 0.22)  # m: the middle of a skater's blade on the ice, ahead of him and out to his shooting side (figures.py draws it here)
 CARRY_AHEAD = pk.R + 0.01  # m: a carried puck sits this far ahead of the blade's middle (on its forehand face)
 TOUCH_MS = 0.15          # m/s: your blade touching an AI's puck this hard (a contact you'd hear) knocks it loose
-PICKUP_R = 0.6           # m: a loose puck this close to an AI blade is his
+PICKUP_R = 0.6           # m: a loose puck this close to an AI blade is his to catch (catch_chance)
+CATCH_MS = (0.0, 6.0, 12.0, 18.0, 24.0)    # m/s, the puck's speed relative to his stick ...
+CATCH_P = (1.0, 1.0, 0.5, 0.1, 0.0)        # ... and the chance he catches it clean (in between: a straight line)
+CATCH_OFF = 0.6          # ... times this if it comes from more than CATCH_SIDE_DEG off where he faces, or he's mid-turn
+CATCH_SIDE_DEG = 60.0
+TURNING_DEG_S = 180.0    # deg/s: turning faster than this is mid-turn
+BOBBLE_S = 0.1           # s: a miss is a bobble (the puck goes on, slowed and knocked off line): he can try again after this
 YOURS_R = 0.6            # m: the puck this close to your blade, and moving with it, is yours
 POKE_R = 1.3             # m: a defender's stick reaches the puck from this close
 POKE_RATE = 1.4          # pokes per second at point blank, against an AI carrier
@@ -176,6 +184,16 @@ def time_to(dist, v0, vmax: float, push: float = PUSH, stop: float = STOP) -> np
     return t0 + np.where(dist <= d_acc, short, long)
 
 
+def catch_chance(rel_ms: float, side_deg: float = 0.0, turn_deg_s: float = 0.0, hands: float = 0.0) -> float:
+    """The chance a skater catches a puck coming at rel_ms relative to his stick, from side_deg off
+    where he faces, while turning at turn_deg_s (change 8: no flat dice). About sure up to 6 m/s,
+    half at 12, a tenth at 18; less from the side or mid-turn; `hands` shifts the curve up."""
+    p = float(np.interp(rel_ms - hands, CATCH_MS, CATCH_P))
+    if side_deg > CATCH_SIDE_DEG or abs(turn_deg_s) > TURNING_DEG_S:
+        p *= 1.0 - (1.0 - CATCH_OFF) * min(max((rel_ms - 2.0) / 4.0, 0.0), 1.0)   # (a slow one he just skates onto)
+    return p
+
+
 def seg_dist(p, a, b) -> tuple[float, float]:
     """(distance from p to segment ab, how far along it the nearest point is, m)."""
     ab = b - a
@@ -196,6 +214,8 @@ class Player:
     stride: float = 0.0
     acc: np.ndarray = field(default_factory=lambda: np.zeros(2))   # his acceleration (it builds at JERK)
     mode: str = "still"                  # what his skating did last: still, push, coast, stop
+    turn: float = 0.0                    # deg/s: how fast he's turning (catch_chance)
+    hands: float = 0.0                   # m/s: his catching curve shifted up this much (the elite profile: about 2)
     cool_until: float = 0.0              # can't take the puck before this (just lost it or let it go)
     next_decide: float = 0.0
     blade: np.ndarray | None = None      # you: where your blade really is
@@ -682,11 +702,18 @@ class Game:
                 best, best_d = p, d
         if best is None:
             return
-        rel = _n(pv - best.vel)
-        if rel < 7.0 or (rel < 16.0 and rng.random() < 0.45):
+        rel_v = pv - best.vel
+        rel = _n(rel_v)
+        side = math.degrees(math.acos(max(-1.0, min(1.0, float(unit(-rel_v) @ best.facing))))) if rel > 0.3 else 0.0
+        if rng.random() < catch_chance(rel, side, best.turn, best.hands):
             self._take(best)
-        else:
-            best.cool_until = t + 0.3                 # it got past his stick
+        else:                                         # a bobble: on it goes, slowed and knocked off line
+            a = math.radians(rng.uniform(-35.0, 35.0))
+            c, s_ = math.cos(a), math.sin(a)
+            keep = rng.uniform(0.4, 0.7)
+            v = np.array([c * pv[0] - s_ * pv[1], s_ * pv[0] + c * pv[1]]) * keep
+            self.puck.place(pxz[0], pxz[1], v[0], v[1])
+            best.cool_until = t + BOBBLE_S
             self.outbox.append(("log", "fumble", {"by": best.id, "rel_ms": round(rel, 1)}))
 
     def _take(self, p: Player) -> None:
@@ -1242,7 +1269,9 @@ class Game:
             pxz, _ = self._puck()
             want = unit(pxz - p.pos)
         if np.any(want):
+            was = p.facing
             p.facing = unit(p.facing + min(1.0, 8.0 * dt) * (want - p.facing))
+            p.turn = math.degrees(math.atan2(was[0] * p.facing[1] - was[1] * p.facing[0], float(was @ p.facing))) / dt
 
     @staticmethod
     def _crosses(a, b, x0: float, x1: float, z0: float, z1: float) -> bool:

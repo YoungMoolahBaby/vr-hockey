@@ -399,6 +399,49 @@ def test_they_cruise_unless_a_read_calls_for_more_and_never_burst_beside_you():
     assert peak <= threes.CRUISE * game.vmax + 1e-6                             # no burst next to you
 
 
+def test_the_catch_falls_off_with_the_pucks_speed_not_a_flat_roll():
+    c = threes.catch_chance
+    assert c(5.0) == 1.0 and c(12.0) == 0.5 and abs(c(18.0) - 0.1) < 1e-9
+    assert c(9.0) > c(12.0) > c(15.0) > c(18.0)                    # smoothly down, no step at 7 or 16
+    assert abs(c(12.0, side_deg=90.0) - 0.3) < 1e-9 and abs(c(12.0, turn_deg_s=300.0) - 0.3) < 1e-9
+    assert c(1.5, side_deg=120.0) == 1.0                           # a slow one he skates onto
+    assert abs(c(14.0, hands=2.0) - 0.5) < 1e-9                    # good hands: the curve 2 m/s up
+
+
+def test_a_missed_catch_is_a_bobble_not_a_free_pass():
+    """It goes on slowed and knocked off line, and he can go after it again a moment later
+    (it used to fly on at full speed past a stick that couldn't touch it for 0.3 s)."""
+    sim, game = make(seed=15)
+    game.start()
+    play(sim, game, 2.5)
+    p = game.by_id["T1"]
+    for o in game.players:
+        if o is not p:
+            o.pos, o.vel = np.array([-9.0 + 3.0 * game.players.index(o), 6.0]), np.zeros(2)
+            o.cool_until = game.t + 5.0
+    p.pos, p.vel, p.facing = np.array([0.0, 30.0]), np.zeros(2), np.array([0.0, -1.0])
+    game.holder, game.yours, game.pass_to = None, False, None
+    q = p.stick()
+    sim.puck.place(q[0], q[1], 0.0, -17.0)                    # hard, straight onto his blade
+    class _Misses:                                            # this time he misses it
+        def __init__(self, rng):
+            self.rng = rng
+
+        def random(self, *a, **k):
+            return 0.99
+
+        def __getattr__(self, name):
+            return getattr(self.rng, name)
+    game.rng = _Misses(game.rng)
+    game.outbox.clear()
+    game._loose(*game._puck(), float(sim.puck.pos[1]))
+    _, v = game._puck()
+    assert game.holder is None and any(e[1] == "fumble" for e in game.outbox if e[0] == "log")
+    assert 0.35 * 17.0 < np.linalg.norm(v) < 0.75 * 17.0          # slowed ...
+    assert v[1] < 0 and abs(np.degrees(np.arctan2(v[0], -v[1]))) <= 35.0 + 1e-6   # ... and knocked off line
+    assert p.cool_until <= game.t + threes.BOBBLE_S + 1e-9
+
+
 def test_a_side_changes_past_the_middle_not_at_it():
     sim, game = make(seed=10)
     xs = [2.0, 0.5, -0.5, -1.0, -1.5, -0.5, 0.8, 1.3]
