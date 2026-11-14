@@ -225,6 +225,9 @@ get a line for each blade, as before. `gear.KIND = "ice"` puts them on the ice s
   blends out jumps in where it's going and steers round people (and round you, a metre clear of
   your head). Off, they play as before 2026-11-13's changes 4 and 5: everyone re-picked every tick,
   shoved apart, snapped off you.
+- AI skating (`aiskate`, default like you; 0 = old): in the 3v3, the AI's push, glide, hockey stop
+  and turn limit are your defaults (6, 1.5, 8 and 6 m/s²), its push builds instead of starting as a
+  step, and it arrives without overshooting. Old: any change of velocity at up to 5 m/s², at once.
 - ice assist (default 16 cm; 0 = off): a blade within this of the ice rests on it, everywhere.
   Nothing stops your hands at the ice, so you can't feel it. In the first free skate the blade
   hovered 2.5-30 cm up, and the puck slid under it at 70% of its crossings. From 16 to 32 cm the
@@ -391,6 +394,12 @@ You and two AI teammates (blue) against three (orange), with a goalie in each ne
   sideways beside you (they used to jump to 0.9 m from you in one tick).
 - The **"steady AI skaters"** setting (`steady`, default on) switches the last four off together, for
   an A/B against how they played before.
+- **They skate on your skating model** (the same limits as your defaults): a push of up to 6 m/s²
+  that builds over about 0.15 s (never a step), easing into the speed they want; the path bends at
+  up to 6 m/s²; they coast at 1.5 m/s², brake to arrive (starting early enough not to overshoot),
+  and turn back with a hockey stop at 8 m/s², then push the new way. Who gets to a loose puck first
+  counts the same: the way each is already going, a stop if it's the wrong way, then the push. The
+  **"AI skating"** setting (`aiskate`: like you, or old) is the A/B: old is one 5 m/s² cap, any way.
 - **Reactions:** when the puck changes hands, each skater reacts after his own reaction time
   (median about 0.3 s, longer if the puck was behind him). The new carrier, whoever made the play
   and a pass's receiver go at once. The "AI reaction time" setting, 0 = everyone at once.
@@ -498,4 +507,4 @@ Next: tuning, after the feel research (`../reports/`).
 | `selfplay_metrics.py` | the AI in numbers: self-play or a recorded game, scored against reports/Lifelike AI players.md |
 | `arena.py` | the whole rink: both ends from zone.py (the far one turned round), its puck (both nets), markings, the scoreboard |
 | `theme.py` | the look: a white rink aboard a mothership. Solid ice, boards, painted lines, the hull and a ring of light overhead, as triangles under the line drawing; the palette, given as the colours the headset shows |
-| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose; staggered reactions to a pass; jumps blended out, marks held, sides past the middle; skaters going round each other and round you without a jump), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |
+| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose; staggered reactions to a pass; jumps blended out, marks held, sides past the middle; skaters going round each other and round you without a jump; their push, stop and arrival inside your limits), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |

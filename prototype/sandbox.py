@@ -193,6 +193,7 @@ SETTINGS = (
     Setting("check", "comfort check", 1, 0, 15, "every {:g} minutes", "off"),   # a 0-10 queasiness check
     Setting("react", "AI reaction time", 0.06, 0.0, 0.48, "{:.2f} seconds", "off"),   # the 3v3 AI (threes.REACT_S)
     Setting("steady", "steady AI skaters", 1, 0, 1, "on", "off"),   # the 3v3 AI: roles kept, jumps blended, going round people
+    Setting("aiskate", "AI skating", 1, 0, 1, "like you", "old"),   # the 3v3 AI on your skating model (threes.PUSH...), or one 5 m/s^2 cap
     Setting("ice", "ice assist", 2, 0, 30, "{:.0f} centimetres"),      # last: one push left from the first
 )
 
@@ -233,7 +234,8 @@ class Tuning:
                 "skate": rig.MOVE_MS, "sprint": SPRINT, "turn": rig.TURN_DEG_S, "magnet": params.magnet, "release": params.release,
                 "push": PUSH, "glide": GLIDE, "skates": SKATES, "stop": STOP, "carve": CARVE, "back": 1.0, "side": 1.0,
                 "snap": SNAP_DEG, "vignette": VIGNETTE, "grid": GRID, "feet": FEET, "aa": AA, "check": COMFORT_CHECK_MIN,
-                "react": threes.REACT_S, "steady": float(threes.STEADY), "ice": pk.ICE_ASSIST * 100}
+                "react": threes.REACT_S, "steady": float(threes.STEADY), "aiskate": float(threes.SKATE_LIKE_YOU),
+                "ice": pk.ICE_ASSIST * 100}
 
     def spec(self) -> stickspec.StickSpec:
         v = self.values

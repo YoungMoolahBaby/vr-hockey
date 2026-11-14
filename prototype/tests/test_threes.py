@@ -335,6 +335,37 @@ def test_an_ai_skater_goes_round_you_without_a_jump():
             assert jumps                                      # the old snap, with the setting off
 
 
+def test_the_ai_skates_on_your_limits():
+    import sandbox
+    assert (threes.PUSH, threes.GLIDE, threes.STOP, threes.CARVE) == (sandbox.PUSH, sandbox.GLIDE, sandbox.STOP,
+                                                                      sandbox.CARVE)
+
+
+def test_an_ai_skater_pushes_off_stops_and_turns_inside_your_limits():
+    """From still to a spot 12 m away, then that spot moved behind him at speed: a push that
+    builds, a hockey stop, a push the new way; no acceleration past the limits, none that steps."""
+    sim, game = make(seed=13)
+    game.start()
+    play(sim, game, 2.5)
+    a = game.by_id["T0"]
+    a.pos, a.vel, a.acc = np.array([0.0, 15.0]), np.zeros(2), np.zeros(2)
+    dt = threes.AI_DT
+    vs, modes = [a.vel.copy()], []
+    for k in range(350):
+        target = np.array([0.0, 27.0]) if k < 90 else np.array([0.0, 14.0])
+        game._skate(a, target, dt)
+        vs.append(a.vel.copy())
+        modes.append(a.mode)
+    acc = np.diff(np.array(vs), axis=0) / dt
+    jerk = np.diff(acc, axis=0) / dt
+    moving = np.linalg.norm(np.array(vs), axis=1)[1:-1] > threes.STOP_DONE    # (a stop ends at rest at once)
+    assert np.linalg.norm(acc, axis=1).max() <= threes.STOP + 1e-6
+    assert np.linalg.norm(jerk[moving], axis=1).max() <= threes.JERK + 1e-6
+    assert max(np.linalg.norm(v) for v in vs[:90]) > 0.95 * game.vmax      # he got up to speed
+    assert "stop" in modes[90:]                                             # stopped, then went back
+    assert abs(a.pos[1] - 14.0) < 0.3 and np.linalg.norm(a.vel) < 0.3       # and arrived
+
+
 def test_a_side_changes_past_the_middle_not_at_it():
     sim, game = make(seed=10)
     xs = [2.0, 0.5, -0.5, -1.0, -1.5, -0.5, 0.8, 1.3]
