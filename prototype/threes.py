@@ -25,6 +25,9 @@ The AI, 50 times a second:
 - his teammates support: one to the back door, one high. The other team marks man to man, goal
   side, and whoever has the carrier pressures him.
 - a loose puck: each team's quickest skater goes for it (not yours if you're closer).
+- reactions: when the puck changes hands, each AI skater keeps going where he was going until his
+  own reaction time is up (about a quarter second, longer if the puck was off to his side or
+  behind him); the new carrier, whoever made the play and the pass's receiver react at once.
 - the goalies (goalie.py; the far one in his end's own frame) track and save: a rebound, or he
   covers it and plays it to a teammate a second later.
 """
@@ -59,6 +62,10 @@ SKATER_GAP = 0.9         # m: skaters don't overlap
 SHOT_MS = 22.0           # m/s: an AI shot (about 50 mph)
 PASS_MS = 10.0           # m/s: an AI pass
 DECIDE_S = 0.25          # s: a carrier reconsiders this often
+REACT_S = 0.18           # s: an AI skater reacts to the puck changing hands after this (over level; 0: at once) ...
+REACT_TAIL = 0.1         # s: ... plus a random tail of this mean (reaction times are skewed to the right) ...
+REACT_SIDE = 0.1         # s: ... plus this with the puck off to his side (50-110 deg from where he faces) ...
+REACT_BEHIND = 0.3       # s: ... or this with it behind him
 SHOOT_RANGE = 16.0       # m
 SHOOT_XG = 0.15          # an AI skater shoots at this chance of a goal (or a bit less, in close)
 WILD = 2.2               # his aim, in goalie.py's aim errors (a rec shooter)
@@ -304,6 +311,7 @@ class Game:
         self.rng = rng if rng is not None else np.random.default_rng()
         self.to_goals, self.level = to_goals, level
         self.you_ms: float | None = None         # your top speed (the skate speed setting): they're never faster
+        self.react = REACT_S                     # their reaction time (the "AI reaction" setting; 0: at once)
         ours = ["U1", "U2"] if you else ["U0", "U1", "U2"]
         self.players = [Player(i, "us", "L" if k % 2 == 0 else "R", np.zeros(2), np.array([0.0, 1.0]))
                         for k, i in enumerate(ours)]
@@ -331,6 +339,10 @@ class Game:
         self._touch = 0.0                # your blade's biggest touch on the puck since the last AI tick (m/s)
         self.targets: dict[str, np.ndarray] = {}     # where each AI skater was steering, last AI tick
         self.chasers: dict[str, str] = {}            # a loose puck: who each team sent for it
+        self._actor: str | None = None   # who just made the play (passed, shot, poked): he reacts at once
+        self._poss_key = "?"             # who had the puck at the last AI tick, as _react saw it ("?": nobody yet)
+        self._react_at: dict[str, float] = {}        # when each AI skater takes in the last change of possession
+        self._held: dict[str, np.ndarray] = {}       # ... and the target he keeps till then
         self._ai_header: str | None = None
         self.t = 0.0
         self.outbox: list[tuple] = []
@@ -371,7 +383,7 @@ class Game:
         elif self.state == "live":
             self._possession(pxz, pv, dt, touch)
             pxz, pv = self._puck()
-            targets = self.targets = self._targets(pxz, pv)
+            targets = self.targets = self._react(self._targets(pxz, pv), pxz)
             for p in self.players:
                 self._skate(p, targets.get(p.id), dt)
             self._separate()
@@ -426,6 +438,7 @@ class Game:
         for k in self.keepers.values():
             k.reset()
         self.holder, self.yours, self.pass_to, self._watch = None, False, None, None
+        self._actor, self._poss_key, self._react_at, self._held = None, "?", {}, {}
         self.puck.place(0.0, self.arena.mid)
 
     def start(self) -> None:
@@ -624,6 +637,7 @@ class Game:
         self.puck.place(*pxz, *v)
         self._lose(h, by=o.id)
         o.cool_until = self.t
+        self._actor = o.id
 
     def _carry_point(self, h: Player) -> np.ndarray:
         """Where a carrier's puck sits: on his blade's forehand, but never in the boards or a net."""
@@ -776,6 +790,7 @@ class Game:
         self.stats["shots"][h.team] += 1
         self.last_touch, self.last_team = h.id, h.team
         self._watch = k.end
+        self._actor = h.id
         k.g.last_s = None
         self.outbox.append(("log", "shot", {"by": h.id, "end": k.end}))
 
@@ -786,12 +801,42 @@ class Game:
         v = unit(lead - origin) * speed
         self.puck.place(origin[0], origin[1], v[0], v[1])
         self.pass_to = m.id
+        self._actor = by
         self.last_touch, self.last_team = by, team
         if m is self.you:
             self.stats["passes_to_you"] += 1
         self.outbox.append(("log", "pass", {"by": by, "to": m.id}))
 
     # ------------------------------------------------------------------ where everyone skates
+    def _react(self, targets: dict, pxz) -> dict:
+        """Staggered reactions (reports/Lifelike AI players.md, change 3). When the puck changes hands
+        (a take, a pass, a shot, a poke, a cover), each AI skater keeps skating where he was going
+        until he has taken it in: REACT_S over level, plus a random tail, plus more if the puck is
+        off to his side or behind him. The new carrier, whoever made the play and a pass's receiver
+        react at once. Only where they skate waits: the puck on a stick is still instant."""
+        h = self.holder
+        key = h.id if isinstance(h, Player) else (h.end if isinstance(h, Keeper) else ("you" if self.yours else ""))
+        if self.react <= 0:
+            self._poss_key, self._react_at, self._held, self._actor = key, {}, {}, None
+            return targets
+        if key != self._poss_key and self._poss_key != "?":
+            base = self.react / max(self.level, 0.3)
+            side, behind = math.cos(math.radians(50)), math.cos(math.radians(110))
+            for p in self.players:
+                if p is h or p.id in (self.pass_to, self._actor):
+                    self._react_at[p.id] = self.t
+                    continue
+                c = float(unit(pxz - p.pos) @ p.facing)
+                extra = REACT_BEHIND if c < behind else (REACT_SIDE if c < side else 0.0)
+                self._react_at[p.id] = self.t + base + float(self.rng.exponential(REACT_TAIL)) + extra
+        self._poss_key, self._actor = key, None
+        for pid, tg in targets.items():
+            if self.t < self._react_at.get(pid, -1.0) and pid in self._held:
+                targets[pid] = self._held[pid]
+            else:
+                self._held[pid] = np.asarray(tg, dtype=float).copy()
+        return targets
+
     def _targets(self, pxz, pv) -> dict[str, np.ndarray]:
         h = self.holder
         out: dict[str, np.ndarray] = {}

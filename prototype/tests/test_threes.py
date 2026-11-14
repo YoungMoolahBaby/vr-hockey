@@ -44,7 +44,7 @@ def test_the_ai_plays_a_game():
     s = game.stats
     print("score", game.score, "shots", s["shots"], "saves", s["saves"], "turnovers", s["turnovers"],
           "blocked", s["blocked"], {k: kinds.count(k) for k in set(kinds)})
-    assert kinds.count("pass") > 20                          # they move it
+    assert kinds.count("pass") > 15                          # they move it (about 9 a minute of play)
     assert s["shots"]["us"] > 3 and s["shots"]["them"] > 3   # both ends get shots
     assert sum(s["saves"].values()) > 2                      # and both goalies work
     assert sum(game.score.values()) >= 1                     # somebody scores
@@ -202,6 +202,38 @@ def test_a_touch_of_your_blade_knocks_the_puck_off_an_ai_carrier():
         if lost:
             assert logs[0][2] == {"from": "T0", "by": "you"}
             assert h.cool_until > t                         # he can't just pick it up again
+
+
+def test_the_ai_reacts_to_a_pass_one_skater_at_a_time():
+    """A pass: the passer and the receiver go at once; everyone else keeps skating where he was
+    going for his own reaction time (about a quarter second, more if the puck is behind him)."""
+    for react in (threes.REACT_S, 0.0):
+        sim, game = make(seed=7)
+        game.react = react
+        game.start()
+        play(sim, game, 2.5)                                      # faceoff and drop
+        u1 = _ai_carries(game, "U1", at=(-3.0, 30.0), facing=(0.0, 1.0))
+        u2 = game.by_id["U2"]
+        u2.pos, u2.facing = np.array([4.0, 33.0]), np.array([-1.0, 0.0])
+        game.t = game._last_ai = game._last_ai + threes.AI_DT
+        before = {pid: tg.copy() for pid, tg in game._react(game._targets(*game._puck()), game._puck()[0]).items()}
+        game._pass(game._carry_point(u1), u2, "us", "U1")
+        game.holder = None
+        moved = {}
+        for k in range(1, 60):                                    # 1.2 s of AI ticks, the puck frozen
+            game.t = game._last_ai = game._last_ai + threes.AI_DT
+            pxz, pv = game._puck()
+            out = game._react(game._targets(pxz, pv), pxz)
+            for pid, tg in out.items():
+                if pid not in moved and pid in before and np.linalg.norm(tg - before[pid]) > 0.01:
+                    moved[pid] = k * threes.AI_DT
+        if react:
+            assert moved["U2"] < 0.03                             # the receiver: at once
+            others = [moved[p] for p in ("U0", "T0", "T1", "T2") if p in moved]
+            assert others and min(others) >= 0.17                 # nobody else before his reaction time
+            assert max(others) < 1.2
+        else:
+            assert all(v < 0.03 for v in moved.values())          # off: everyone on the same tick
 
 
 def test_the_ai_log_has_a_field_for_every_column():

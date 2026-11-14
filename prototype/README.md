@@ -217,6 +217,10 @@ get a line for each blade, as before. `gear.KIND = "ice"` puts them on the ice s
   They're logged as 0, 2 and 5 out of 10. A 0-10 count on the left stick was tried first and was
   too fiddly to answer in the headset. Every frame of the thumbsticks' motion goes to `rig.csv`,
   and a summary to `meta.json` (`comfort`).
+- AI reaction time (`react`, default 0.18 s; 0 = off, everyone at once as before): in the 3v3, when
+  the puck changes hands each AI skater keeps going where he was going until he's taken it in:
+  this, plus a random tail (about 0.1 s), plus 0.1 s with the puck off to his side or 0.3 s with it
+  behind him. Steps of 0.06 s, so three presses turn it off for an A/B.
 - ice assist (default 16 cm; 0 = off): a blade within this of the ice rests on it, everywhere.
   Nothing stops your hands at the ice, so you can't feel it. In the first free skate the blade
   hovered 2.5-30 cm up, and the puck slid under it at 70% of its crossings. From 16 to 32 cm the
@@ -372,6 +376,9 @@ You and two AI teammates (blue) against three (orange), with a goalie in each ne
 - **His teammates** take the back door and the high slot.
 - **The other team** marks man to man, goal side. Whoever has the carrier pressures him.
 - **A loose puck:** each team's quickest skater goes for it (not your teammates, if you're closer).
+- **Reactions:** when the puck changes hands, each skater reacts after his own reaction time
+  (median about 0.3 s, longer if the puck was behind him). The new carrier, whoever made the play
+  and a pass's receiver go at once. The "AI reaction time" setting, 0 = everyone at once.
 - **The goalies** are the drills' rec goalie, one per end. After a save there's a rebound, or he
   covers it and plays it out a second later.
 - **AI against AI** (no you): about 1.4 goals a minute and 28% shooting. Shots are even between the
@@ -476,4 +483,4 @@ Next: tuning, after the feel research (`../reports/`).
 | `selfplay_metrics.py` | the AI in numbers: self-play or a recorded game, scored against reports/Lifelike AI players.md |
 | `arena.py` | the whole rink: both ends from zone.py (the far one turned round), its puck (both nets), markings, the scoreboard |
 | `theme.py` | the look: a white rink aboard a mothership. Solid ice, boards, painted lines, the hull and a ring of light overhead, as triangles under the line drawing; the palette, given as the colours the headset shows |
-| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |
+| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose; staggered reactions to a pass), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |

@@ -17,6 +17,7 @@ def test_a_short_self_play_game_is_recorded_and_scored(tmp_path):
     assert R["counts"]["passes"] > 3 and R["counts"]["touches"] > 5
     assert 0.0 <= R["completion"] <= 1.0 and 0.0 < R["mean_speed"] <= 1.0
     assert 0.9 < R["carry_p90"] <= 0.96                     # a carrier skates at 0.95 of the top
+    assert R["role_same_tick"] < 0.45 and R["role_median_s"] > 0.15     # staggered reactions (change 3)
     assert R["to_you"] is None                              # no you in self-play
     text = sm.table(R)
     assert "Pass completion" in text and "baseline" in text
