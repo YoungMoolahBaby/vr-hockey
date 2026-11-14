@@ -15,9 +15,10 @@ data/selfplay-<time>/s<seed>/, then read back, so self-play and your games are s
 The table: the report's baseline (measured 2026-11-13 on the AI before any of its changes, with
 its own probe; this script reproduces it within the spread between seeds), this run, and the
 report's target. Definitions as in the report: a target jump is a skater's steering target moving
-more than 2 m in one AI tick; a shove, a skater moved more than 3 cm beyond his velocity in one tick;
-a role reaction, the time from a change of who has the puck to a skater's target first moving
-more than 1.5 m. The first 0.5 s after each faceoff is left out.
+more than 2 m in one AI tick (where he steers, and where his role says to go before
+change 4's smoothing); a shove, a skater moved more than 3 cm beyond his velocity in one tick;
+a role reaction, the time from a change of who has the puck to a skater's role target (before the
+smoothing) first moving more than 1.5 m. The first 0.5 s after each faceoff is left out.
 """
 
 from __future__ import annotations
@@ -49,8 +50,9 @@ TABLE = [
     # key, label, baseline, target, format
     ("role_same_tick", "Role changes on the same tick as a possession change", 0.951, "<= 25%", "pct"),
     ("role_median_s", "... median role reaction (s)", 0.0, "0.2-0.3", "f2"),
-    ("target_jumps", "Target jumps > 2 m, per skater-min", 48.1, "< 2", "f1"),
-    ("target_jumps_settled", "... in settled play", 9.3, "", "f1"),
+    ("target_jumps", "Target jumps > 2 m (where they steer), per skater-min", 48.1, "< 2", "f1"),
+    ("raw_jumps", "... before the smoothing (their roles)", 48.1, "", "f1"),
+    ("raw_jumps_settled", "... of those, in settled play", 9.3, "", "f1"),
     ("chaser_changes", "Chaser changes, per team per loose-puck min", 4.3, "< 1", "f1"),
     ("chaser_back", "... back to the first chaser within 1 s", 0.392, "< 5%", "pct"),
     ("marks_settled", "Mark changes in settled play, per skater per game-min", 2.14, "< 0.5", "f2"),
@@ -257,6 +259,8 @@ class Score:
         F = np.stack([r.f(f"{p}_fx", f"{p}_fz") for p in ids], 1)
         B = np.stack([r.f(f"{p}_bx", f"{p}_bz") for p in ids], 1)
         TG = np.stack([r.f(f"{p}_tx", f"{p}_tz") for p in ids], 1)
+        RT = (np.stack([r.f(f"{p}_rx", f"{p}_rz") for p in ids], 1) if f"{ids[0]}_rx" in r.col
+              else TG)                               # where their roles said to go (logs before change 4: = TG)
         MK = np.stack([r.s(f"{p}_mark") for p in ids], 1)
         teams = [team_of(p) for p in ids]
         YP, YB = r.f("you_x", "you_z"), r.f("you_bx", "you_bz")
@@ -304,7 +308,7 @@ class Score:
             att[i], flip_at[i] = cur, flip_t
 
         for j in range(J):
-            p, v, fc, tg = P[:, j], V[:, j], F[:, j], TG[:, j]
+            p, v, fc, tg, rt = P[:, j], V[:, j], F[:, j], TG[:, j], RT[:, j]
             s = np.linalg.norm(v, axis=1)
             A["skater_min"] += gmin
             self.add("speed_frac", s[ok] / vm[ok])
@@ -330,17 +334,19 @@ class Score:
             resid = np.linalg.norm(np.diff(p, axis=0) - v[1:] * gap[:, None], axis=1)
             A["shoves"] += int(np.sum((resid > 0.03) & okk))
             tj = np.nan_to_num(np.linalg.norm(np.diff(tg, axis=0), axis=1))
-            jumps = np.flatnonzero((tj > 2.0) & okk) + 1
-            A["target_jumps"] += len(jumps)
-            A["target_jumps_settled"] += int(np.sum(~near_h[jumps]))
-            for i in ci:                              # role reactions
-                if i < 1 or np.isnan(tg[i - 1]).any():
+            A["target_jumps"] += int(np.sum((tj > 2.0) & okk))
+            rj = np.nan_to_num(np.linalg.norm(np.diff(rt, axis=0), axis=1))
+            jumps = np.flatnonzero((rj > 2.0) & okk) + 1
+            A["raw_jumps"] += len(jumps)
+            A["raw_jumps_settled"] += int(np.sum(~near_h[jumps]))
+            for i in ci:                              # role reactions: when his role first moves him
+                if i < 1 or np.isnan(rt[i - 1]).any():
                     continue
-                ref = tg[i - 1]
+                ref = rt[i - 1]
                 for k in range(i, min(n, i + 50)):
                     if not ok[k]:
                         break
-                    if not np.isnan(tg[k]).any() and np.linalg.norm(tg[k] - ref) > 1.5:
+                    if not np.isnan(rt[k]).any() and np.linalg.norm(rt[k] - ref) > 1.5:
                         self.add("react", t[k] - t[i])
                         break
             off = ok & (H != j)
@@ -503,7 +509,8 @@ class Score:
             "role_same_tick": float(np.mean(react <= 0.025)) if len(react) else None,
             "role_median_s": _pct(react, 50),
             "target_jumps": A["target_jumps"] / sk,
-            "target_jumps_settled": A["target_jumps_settled"] / sk,
+            "raw_jumps": A["raw_jumps"] / sk,
+            "raw_jumps_settled": A["raw_jumps_settled"] / sk,
             "chaser_changes": A["chaser_changes"] / max(A["loose_min"], 1e-9),
             "chaser_back": A["chaser_back"] / max(A["chaser_changes"], 1),
             "marks_settled": A["marks_settled"] / sk,

@@ -236,6 +236,55 @@ def test_the_ai_reacts_to_a_pass_one_skater_at_a_time():
             assert all(v < 0.03 for v in moved.values())          # off: everyone on the same tick
 
 
+def test_a_jump_in_a_target_is_blended_out_and_smooth_motion_followed_exactly():
+    sim, game = make(seed=8)
+    dt = threes.AI_DT
+    raw = np.array([0.0, 20.0])
+    for k in range(30):                                       # moving at 2.5 m/s: followed with no lag
+        raw = raw + np.array([0.05, 0.0])
+        steer = game._smooth({"T0": raw}, dt)["T0"]
+    assert np.linalg.norm(steer - raw) < 1e-9
+    before = steer.copy()
+    raw = raw + np.array([0.0, 6.0])                          # his role says: 6 m over there, now
+    path = [game._smooth({"T0": raw}, dt)["T0"] for _ in range(100)]
+    assert np.linalg.norm(path[0] - before) < 0.5             # no jump where he steers
+    steps = [np.linalg.norm(b - a) for a, b in zip(path, path[1:])]
+    assert max(steps) < 0.5
+    gone = [np.linalg.norm(p - raw) for p in path]
+    i_half = next(i for i, g in enumerate(gone) if g < 3.0)   # half of it blended out in about 0.3 s
+    assert 0.15 < i_half * dt < 0.5
+    assert gone[-1] < 0.05                                    # all of it within 2 s
+
+
+def test_defenders_keep_their_men_and_swap_only_when_they_cross():
+    sim, game = make(seed=9)
+    game.start()
+    play(sim, game, 2.5)
+    us = [game.by_id[i] for i in ("U0", "U1", "U2")]
+    them = [game.by_id[i] for i in ("T0", "T1", "T2")]
+    carrier = them[0]
+    for k, (d, a) in enumerate(zip(us, them)):
+        a.pos, d.pos = np.array([-6.0 + 6 * k, 30.0]), np.array([-6.0 + 6 * k, 27.0])
+    game._def_team = "them"
+    game._defend("us", carrier, {})                           # the puck just changed sides: fresh marks
+    assert {d.id: game.marks[d.id] for d in us} == {"U0": "T0", "U1": "T1", "U2": "T2"}
+    them[1].pos = np.array([-2.0, 30.0])                      # T1 drifts toward U0: not enough to swap
+    game._defend("us", carrier, {})
+    assert game.marks["U1"] == "T1" and game.marks["U0"] == "T0"
+    them[0].pos, them[1].pos = np.array([1.0, 27.5]), np.array([-6.0, 27.5])    # T0 and T1 cross
+    game.outbox.clear()
+    game._defend("us", carrier, {})
+    assert game.marks["U0"] == "T1" and game.marks["U1"] == "T0"
+    assert any(e[0] == "log" and e[1] == "switch" for e in game.outbox)
+
+
+def test_a_side_changes_past_the_middle_not_at_it():
+    sim, game = make(seed=10)
+    xs = [2.0, 0.5, -0.5, -1.0, -1.5, -0.5, 0.8, 1.3]
+    sides = [game._side("carry:T0", x) for x in xs]
+    assert sides == [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0]
+
+
 def test_the_ai_log_has_a_field_for_every_column():
     sim, game = make(you=True, seed=6)
     head = (np.array([1.0, 20.0]), np.array([0.0, 1.0]))

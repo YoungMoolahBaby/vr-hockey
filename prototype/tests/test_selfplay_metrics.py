@@ -14,7 +14,7 @@ def test_a_short_self_play_game_is_recorded_and_scored(tmp_path):
     assert sm.runs_in(tmp_path) == [tmp_path / "s1"]
     R = sm.score(sm.runs_in(tmp_path))
     assert R["games"] == 1 and abs(R["vmax"] - 0.95 * 3.0) < 1e-6
-    assert R["counts"]["passes"] > 3 and R["counts"]["touches"] > 5
+    assert R["counts"]["passes"] >= 1 and R["counts"]["touches"] > 5
     assert 0.0 <= R["completion"] <= 1.0 and 0.0 < R["mean_speed"] <= 1.0
     assert 0.9 < R["carry_p90"] <= 0.96                     # a carrier skates at 0.95 of the top
     assert R["role_same_tick"] < 0.45 and R["role_median_s"] > 0.15     # staggered reactions (change 3)

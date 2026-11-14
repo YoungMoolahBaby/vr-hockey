@@ -22,18 +22,24 @@ The AI, 50 times a second:
 - the carrier skates for the slot, away from defenders. Every quarter second or so he shoots (the
   goal chance from goalie.py, against the real goalie), passes (to the most dangerous open
   teammate, you included, if the lane is clear) or keeps going.
-- his teammates support: one to the back door, one high. The other team marks man to man, goal
-  side, and whoever has the carrier pressures him.
-- a loose puck: each team's quickest skater goes for it (not yours if you're closer).
+- his teammates support: one to the back door, one high (each keeps his spot unless another is a
+  20% shorter skate). The other team marks man to man, goal side, and whoever has the carrier
+  pressures him: each picks up the nearest man when the puck changes sides, then keeps him; two
+  swap only when their men cross.
+- a loose puck: each team's quickest skater goes for it (not yours if you're closer), and keeps
+  it unless a teammate gets there clearly sooner.
 - reactions: when the puck changes hands, each AI skater keeps going where he was going until his
   own reaction time is up (about a quarter second, longer if the puck was off to his side or
   behind him); the new carrier, whoever made the play and the pass's receiver react at once.
+- no snap decisions: a role's side of the rink changes past the middle, not at it, and any jump in
+  where a skater is going is blended out over about a quarter second (_smooth).
 - the goalies (goalie.py; the far one in his end's own frame) track and save: a rebound, or he
   covers it and plays it to a teammate a second later.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass, field
 
@@ -66,6 +72,12 @@ REACT_S = 0.18           # s: an AI skater reacts to the puck changing hands aft
 REACT_TAIL = 0.1         # s: ... plus a random tail of this mean (reaction times are skewed to the right) ...
 REACT_SIDE = 0.1         # s: ... plus this with the puck off to his side (50-110 deg from where he faces) ...
 REACT_BEHIND = 0.3       # s: ... or this with it behind him
+CHASE_KEEP = 0.2         # s: a loose puck's chaser keeps it unless a teammate gets there this much sooner
+SWAP_M = 2.0             # m: two defenders swap men only if it saves each of them this much skating
+SIDE_FLIP = 1.25         # m: a role's side of the rink changes this far past the middle (x = 0), not at it
+SPOT_BETTER = 0.8        # supporters change spots only for one this much shorter a skate (20% better)
+SMOOTH_HALF = 0.25       # s: a jump in where a skater is going is blended out over about this (half-life)
+JUMP_M = 0.25            # m: a target moving more than this in one AI tick has jumped (12.5 m/s: no skater)
 SHOOT_RANGE = 16.0       # m
 SHOOT_XG = 0.15          # an AI skater shoots at this chance of a goal (or a bit less, in close)
 WILD = 2.2               # his aim, in goalie.py's aim errors (a rec shooter)
@@ -329,7 +341,6 @@ class Game:
         self.last_touch: str | None = None   # who touched it last (an id, "you", or a keeper's end)
         self.last_team: str | None = None
         self.marks: dict[str, str] = {}  # defender id -> the attacker he has
-        self._marks_t = -1.0
         self._watch: str | None = None   # the end whose goalie is facing a shot (checked every tick)
         self._last_ai = -1.0
         self._you_prev = None
@@ -343,6 +354,8 @@ class Game:
         self._poss_key = "?"             # who had the puck at the last AI tick, as _react saw it ("?": nobody yet)
         self._react_at: dict[str, float] = {}        # when each AI skater takes in the last change of possession
         self._held: dict[str, np.ndarray] = {}       # ... and the target he keeps till then
+        self.raw_targets: dict[str, np.ndarray] = {}  # where each was going before the smoothing (self.targets: after)
+        self._roles_reset()
         self._ai_header: str | None = None
         self.t = 0.0
         self.outbox: list[tuple] = []
@@ -370,7 +383,8 @@ class Game:
         dt = AI_DT if self._last_ai < 0 else min(t - self._last_ai, 0.1)
         self._last_ai = t
         touch, self._touch = self._touch, 0.0
-        self.targets, self.chasers = {}, {}
+        self._prev_chasers = self.chasers
+        self.targets, self.raw_targets, self.chasers = {}, {}, {}
         self._you_update(blade, head, dt)
         pxz, pv = self._puck()
         if self.state in ("ready", "faceoff"):
@@ -383,7 +397,8 @@ class Game:
         elif self.state == "live":
             self._possession(pxz, pv, dt, touch)
             pxz, pv = self._puck()
-            targets = self.targets = self._react(self._targets(pxz, pv), pxz)
+            self.raw_targets = self._react(self._targets(pxz, pv), pxz)
+            targets = self.targets = self._smooth(self.raw_targets, dt)
             for p in self.players:
                 self._skate(p, targets.get(p.id), dt)
             self._separate()
@@ -439,6 +454,7 @@ class Game:
             k.reset()
         self.holder, self.yours, self.pass_to, self._watch = None, False, None, None
         self._actor, self._poss_key, self._react_at, self._held = None, "?", {}, {}
+        self._roles_reset()
         self.puck.place(0.0, self.arena.mid)
 
     def start(self) -> None:
@@ -808,6 +824,52 @@ class Game:
         self.outbox.append(("log", "pass", {"by": by, "to": m.id}))
 
     # ------------------------------------------------------------------ where everyone skates
+    def _roles_reset(self) -> None:
+        """Forget the roles (a faceoff): who chases, who marks whom, sides, spots, the smoothing."""
+        self._prev_chasers: dict[str, str] = {}
+        self._back: dict[str, str] = {}              # a loose puck: who stays back, per team
+        self._def_team: str | None = None            # the team the marks are for
+        self._sides: dict[str, float] = {}           # a role's side of the rink (_side)
+        self._spot_of: dict[str, str] = {}           # supporter id -> his spot's name
+        self._raw_prev: dict[str, np.ndarray] = {}   # the smoothing (_smooth): last raw target,
+        self._steer: dict[str, np.ndarray] = {}      # ... last steering point,
+        self._off: dict[str, np.ndarray] = {}        # ... and the jump still being blended out (and its rate)
+        self._offv: dict[str, np.ndarray] = {}
+
+    def _side(self, key: str, x: float) -> float:
+        """Which side of the rink's long axis (x = 0) a role is on: it changes only once x is
+        SIDE_FLIP past the middle on the other side, so a skater near the middle doesn't flip it."""
+        s = self._sides.get(key)
+        if s is None or x * s < -SIDE_FLIP:
+            s = self._sides[key] = 1.0 if x >= 0 else -1.0
+        return s
+
+    def _smooth(self, targets: dict, dt: float) -> dict:
+        """Where each skater steers: his target, with any jump in it blended out (a critically damped
+        spring with a SMOOTH_HALF half-life on the jump). A target that moves smoothly (a man he
+        marks, a spot moving with the carrier) is followed exactly, with no lag."""
+        y = 2.0 * math.log(2.0) / SMOOTH_HALF
+        e = math.exp(-y * dt)
+        out = {}
+        for pid, raw in targets.items():
+            raw = np.asarray(raw, dtype=float)
+            prev, off, offv = self._raw_prev.get(pid), self._off.get(pid), self._offv.get(pid)
+            if off is None:
+                off, offv = np.zeros(2), np.zeros(2)
+            if prev is None:                          # no target last tick: blend in from where he was steering
+                last = self._steer.get(pid)
+                off = (last - raw) if last is not None else np.zeros(2)
+            elif float(np.linalg.norm(raw - prev)) > JUMP_M:
+                off = off + (prev - raw)              # it jumped: start from where he was going
+            j1 = offv + off * y
+            off, offv = e * (off + j1 * dt), e * (offv - j1 * y * dt)
+            self._raw_prev[pid], self._off[pid], self._offv[pid] = raw, off, offv
+            out[pid] = self._steer[pid] = raw + off
+        for pid in list(self._raw_prev):              # no target this tick (he coasts): start afresh next time
+            if pid not in targets:
+                del self._raw_prev[pid]
+        return out
+
     def _react(self, targets: dict, pxz) -> dict:
         """Staggered reactions (reports/Lifelike AI players.md, change 3). When the puck changes hands
         (a take, a pass, a shot, a poke, a cover), each AI skater keeps skating where he was going
@@ -858,7 +920,7 @@ class Game:
         end = attack_end(h.team)
         net = self.arena.net(end)
         toward = 1.0 if end == "far" else -1.0
-        side = 1.0 if h.pos[0] >= 0 else -1.0
+        side = self._side("carry:" + h.id, float(h.pos[0]))
         slot = net + np.array([side * 2.0, -toward * 6.5])
         if float(np.linalg.norm(slot - h.pos)) < 2.0:             # in the slot: cut across
             slot = net + np.array([-side * 2.5, -toward * 5.0])
@@ -876,26 +938,41 @@ class Game:
         end = attack_end(team)
         net = self.arena.net(end)
         toward = 1.0 if end == "far" else -1.0
-        side = 1.0 if c[0] >= 0 else -1.0
+        side = self._side("support:" + team, float(c[0]))
         deep = abs(float(net[1] - c[1])) < 15.0
         door = net + np.array([-side * 1.8, -toward * 3.0])
         high = net + np.array([-side * 5.0, -toward * 12.0]) if deep else c + np.array([-side * 7.0, toward * 5.0])
         trail = c + np.array([side * 3.0, -toward * 5.0])
         mates = [p for p in self.players if p.team == team and p is not carrier]
-        spots = [door, high] if deep else [high, trail]
+        spots = {"door": door, "high": high} if deep else {"high": high, "trail": trail}
         if len(mates) == 3:
-            spots.append(trail)
-        mates.sort(key=lambda p: float(np.linalg.norm(p.pos - spots[0])))
-        for p, s in zip(mates, spots):
-            out[p.id] = s
+            spots["trail" if deep else "trail2"] = trail
+        if not mates:
+            return
+        names = list(spots)
+
+        def cost(assign) -> float:
+            return sum(float(np.linalg.norm(p.pos - spots[n])) for p, n in zip(mates, assign))
+        best = min(itertools.permutations(names, len(mates)), key=cost)
+        now = tuple(self._spot_of.get(p.id) for p in mates)        # keep the spots they have, unless
+        if len(set(now)) == len(now) and all(n in spots for n in now) and cost(best) > SPOT_BETTER * cost(now):
+            best = now                                             # ... another way is 20% shorter
+        for p, n in zip(mates, best):
+            self._spot_of[p.id] = n
+            out[p.id] = spots[n]
 
     def _defend(self, team: str, carrier, out: dict) -> None:
-        """Man to man, goal side; whoever has the carrier pressures him."""
+        """Man to man, goal side; whoever has the carrier pressures him. When the puck changes sides
+        each picks up the nearest man (the carrier first); then he keeps his man. Two swap only when
+        their men cross and it saves both of them SWAP_M of skating; a carrier nobody has (you're
+        one of us, so we're a defender short) is taken by the nearest."""
         mine = [p for p in self.players if p.team == team]
         theirs = self.team(OTHER[team])
         net = self.arena.net(defend_end(team))
-        if self.t - self._marks_t > 0.6 or any(d.id not in self.marks for d in mine):
-            self._marks_t = self.t
+        by = {a.id: a for a in theirs}
+        held = [self.marks.get(d.id) for d in mine]
+        if team != self._def_team or not all(a in by for a in held) or len(set(held)) < len(held):
+            self._def_team = team
             pairs = sorted(((float(np.linalg.norm(d.pos - a.pos)), d.id, a.id) for d in mine for a in theirs))
             if carrier is not None:                   # the carrier is taken first, by the nearest
                 pairs.sort(key=lambda x: (x[2] != carrier.id, x[0]))
@@ -904,7 +981,17 @@ class Game:
                 if d not in marks and a not in used:
                     marks[d], used = a, used | {a}
             self.marks.update(marks)
-        by = {a.id: a for a in theirs}
+        else:
+            for d1, d2 in itertools.combinations(mine, 2):
+                a1, a2 = by[self.marks[d1.id]], by[self.marks[d2.id]]
+                if (float(np.linalg.norm(d1.pos - a2.pos)) < float(np.linalg.norm(d1.pos - a1.pos)) - SWAP_M and
+                        float(np.linalg.norm(d2.pos - a1.pos)) < float(np.linalg.norm(d2.pos - a2.pos)) - SWAP_M):
+                    self.marks[d1.id], self.marks[d2.id] = a2.id, a1.id
+                    self.outbox.append(("log", "switch", {"team": team, "a": d1.id, "b": d2.id}))
+            if carrier is not None and mine and carrier.id not in {self.marks[d.id] for d in mine}:
+                d = min(mine, key=lambda d: float(np.linalg.norm(d.pos - carrier.pos)))
+                self.marks[d.id] = carrier.id
+                self.outbox.append(("log", "switch", {"team": team, "a": d.id, "to": carrier.id}))
         for d in mine:
             a = by.get(self.marks.get(d.id))
             if a is None:
@@ -927,6 +1014,9 @@ class Game:
                 continue
             times = {p.id: self._reach(p, path) for p in cands}
             chaser = min(cands, key=lambda p: times[p.id][0])
+            was = self._prev_chasers.get(team)        # he keeps it unless a teammate is clearly sooner
+            if was in times and was != chaser.id and times[was][0] <= times[chaser.id][0] + CHASE_KEEP:
+                chaser = self.by_id[was]
             if self.pass_to in times:                 # a pass on its way: the receiver goes to it
                 chaser = self.by_id[self.pass_to]
             if team == "us" and self.you is not None and self.you.blade is not None and self.pass_to != chaser.id:
@@ -939,11 +1029,19 @@ class Game:
             rest = [p for p in cands if p is not chaser]
             net_own = self.arena.net(defend_end(team))
             net_att = self.arena.net(attack_end(team))
-            for i, p in enumerate(sorted(rest, key=lambda p: float(np.linalg.norm(p.pos - net_own)))):
-                if i == 0:                            # the one nearest home stays between it and our net
+            home = {p.id: float(np.linalg.norm(p.pos - net_own)) for p in rest}
+            back = min(rest, key=lambda p: home[p.id]) if rest else None
+            was = self._back.get(team)                # he stays back unless a teammate is 2 m nearer home
+            if back is not None and was in home and home[was] <= home[back.id] + 2.0:
+                back = self.by_id[was]
+            if back is not None:
+                self._back[team] = back.id
+            open_x = -6.0 * self._side("open:" + team, float(pxz[0]))
+            for p in rest:
+                if p is back:                         # the one nearest home stays between it and our net
                     out[p.id] = pxz + 0.45 * (net_own - pxz)
                 else:                                 # the other gets open up ice
-                    out[p.id] = pxz + 0.35 * (net_att - pxz) + np.array([-6.0 if pxz[0] > 0 else 6.0, 0.0])
+                    out[p.id] = pxz + 0.35 * (net_att - pxz) + np.array([open_x, 0.0])
 
     TAUS = np.arange(0.0, 2.01, 0.1)
 
@@ -1067,11 +1165,12 @@ class Game:
                     a.pos = y.pos + unit(d if n > 1e-6 else np.array([1.0, 0.0])) * SKATER_GAP
 
     # ------------------------------------------------------------------ for the app
-    AI_COLS = ("x", "z", "vx", "vz", "fx", "fz", "bx", "bz", "tx", "tz", "mark")
+    AI_COLS = ("x", "z", "vx", "vz", "fx", "fz", "bx", "bz", "tx", "tz", "rx", "rz", "mark")
 
     def ai_header(self) -> str:
         """ai.csv's header: the game, the puck, you, then each AI skater (position, velocity,
-        facing, blade, where he's steering and the man he marks), then the goalies. Arena (x, z)."""
+        facing, blade, where he's steering (t) and where his role says to go before the smoothing
+        (r), and the man he marks), then the goalies. Arena (x, z)."""
         if self._ai_header is None:
             cols = ["t", "state", "holder", "pass_to", "vmax", "px", "py", "pz", "pvx", "pvz",
                     "you_x", "you_z", "you_fx", "you_fz", "you_bx", "you_bz", "chase_us", "chase_them"]
@@ -1095,9 +1194,9 @@ class Game:
         row += f(*y.blade) if y is not None and y.blade is not None else ["", ""]
         row += [self.chasers.get("us", ""), self.chasers.get("them", "")]
         for p in self.players:
-            tg = self.targets.get(p.id)
             row += f(*p.pos, *p.vel, *p.facing, *p.stick())
-            row += f(*tg) if tg is not None else ["", ""]
+            for tg in (self.targets.get(p.id), self.raw_targets.get(p.id)):
+                row += f(*tg) if tg is not None else ["", ""]
             row.append(self.marks.get(p.id, "") if self.state == "live" else "")
         for k in (self.keepers["home"], self.keepers["far"]):
             row += f(*k.pos)
