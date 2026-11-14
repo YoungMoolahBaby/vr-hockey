@@ -57,6 +57,8 @@ TABLE = [
     ("chaser_back", "... back to the first chaser within 1 s", 0.392, "< 5%", "pct"),
     ("marks_settled", "Mark changes in settled play, per skater per game-min", 2.14, "< 0.5", "f2"),
     ("shoves", "Shoves, per skater-min", 27.1, "< 1", "f1"),
+    ("you_jumps", "... within 2 m of you, per min (a game you played)", None, "0", "f1"),
+    ("you_closest", "Closest an AI skater comes to you, median minute (m)", None, "", "f2"),
     ("cap_flips", "Acceleration reversals at the limit, per skater-min", 35.6, "< 2", "f1"),
     ("jerk_p99", "Jerk p99 (m/s^3)", 458, "< 100", "f0"),
     ("hard_acc", "Hard speed-ups, per skater-min", 12.2, "3-6", "f1"),
@@ -333,6 +335,9 @@ class Score:
             self.add("face_off", _ang(fc[mv], v[mv]))
             resid = np.linalg.norm(np.diff(p, axis=0) - v[1:] * gap[:, None], axis=1)
             A["shoves"] += int(np.sum((resid > 0.03) & okk))
+            if you_in:
+                near = np.nan_to_num(np.linalg.norm(p - YP, axis=1), nan=9.0)[1:] < 2.0
+                A["you_jumps"] += int(np.sum((resid > 0.03) & okk & near))
             tj = np.nan_to_num(np.linalg.norm(np.diff(tg, axis=0), axis=1))
             A["target_jumps"] += int(np.sum((tj > 2.0) & okk))
             rj = np.nan_to_num(np.linalg.norm(np.diff(rt, axis=0), axis=1))
@@ -357,6 +362,13 @@ class Score:
                 if mk[i] != mk[i - 1] and mk[i] and mk[i - 1]:
                     A["marks_after_flip" if t[i] - flip_at[i] <= 0.65 else "marks_settled"] += 1
 
+        if you_in:                                   # the closest any AI skater came to you, minute by minute
+            gapsy = np.nanmin(np.linalg.norm(P - YP[:, None, :], axis=2), axis=1)
+            for m0 in np.arange(t[0], t[-1], 60.0):
+                w = ok & (t >= m0) & (t < m0 + 60.0) & ~np.isnan(gapsy)
+                if w.sum() > 100:
+                    self.add("you_closest", float(gapsy[w].min()))
+            A["you_min"] += gmin
         loose = ok & (H == -1)                        # chasers
         A["loose_min"] += 2 * float(dt_[loose].sum()) / 60
         for team in ("us", "them"):
@@ -515,6 +527,8 @@ class Score:
             "chaser_back": A["chaser_back"] / max(A["chaser_changes"], 1),
             "marks_settled": A["marks_settled"] / sk,
             "shoves": A["shoves"] / sk,
+            "you_jumps": A["you_jumps"] / A["you_min"] if A["you_min"] else None,
+            "you_closest": _pct(self.cat("you_closest"), 50),
             "cap_flips": A["cap_flips"] / sk,
             "jerk_p99": _pct(self.cat("jerk"), 99),
             "hard_acc": A["hard_acc"] / sk,

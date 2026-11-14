@@ -78,6 +78,13 @@ SIDE_FLIP = 1.25         # m: a role's side of the rink changes this far past th
 SPOT_BETTER = 0.8        # supporters change spots only for one this much shorter a skate (20% better)
 SMOOTH_HALF = 0.25       # s: a jump in where a skater is going is blended out over about this (half-life)
 JUMP_M = 0.25            # m: a target moving more than this in one AI tick has jumped (12.5 m/s: no skater)
+AVOID_S = 0.5            # s: a skater steers round anyone he'd pass close to within this ...
+AVOID_M = 1.0            # m: ... closer than this, for another AI skater ...
+AVOID_YOU_M = 2.0        # m: ... or this for you (1 m when he's in your view and closing slowly: showing for a pass)
+AVOID_YOU_S = 1.0        # s: ... looking this far ahead for you (and he may slow for you, not only step round)
+BODY_MIN = 0.6           # m: AI skaters closer than this are pushed apart; you are never pushed, nor is he snapped off you
+AVOID_EASE = 0.15        # s: the steering-round request eases in and out over about this (no chatter)
+STEADY = True            # changes 4 and 5 (the "steady AI skaters" setting): roles kept, jumps blended, steering round people
 SHOOT_RANGE = 16.0       # m
 SHOOT_XG = 0.15          # an AI skater shoots at this chance of a goal (or a bit less, in close)
 WILD = 2.2               # his aim, in goalie.py's aim errors (a rec shooter)
@@ -324,6 +331,7 @@ class Game:
         self.to_goals, self.level = to_goals, level
         self.you_ms: float | None = None         # your top speed (the skate speed setting): they're never faster
         self.react = REACT_S                     # their reaction time (the "AI reaction" setting; 0: at once)
+        self.steady = STEADY                     # the "steady AI skaters" setting (off: as before changes 4-5)
         ours = ["U1", "U2"] if you else ["U0", "U1", "U2"]
         self.players = [Player(i, "us", "L" if k % 2 == 0 else "R", np.zeros(2), np.array([0.0, 1.0]))
                         for k, i in enumerate(ours)]
@@ -399,8 +407,9 @@ class Game:
             pxz, pv = self._puck()
             self.raw_targets = self._react(self._targets(pxz, pv), pxz)
             targets = self.targets = self._smooth(self.raw_targets, dt)
+            avoid = self._avoid()
             for p in self.players:
-                self._skate(p, targets.get(p.id), dt)
+                self._skate(p, targets.get(p.id), dt, avoid.get(p.id))
             self._separate()
             self._carry()
             pxz, pv = self._puck()
@@ -829,18 +838,20 @@ class Game:
         self._prev_chasers: dict[str, str] = {}
         self._back: dict[str, str] = {}              # a loose puck: who stays back, per team
         self._def_team: str | None = None            # the team the marks are for
+        self._marks_t = -1.0                         # (not steady: marks picked afresh every 0.6 s, as before)
         self._sides: dict[str, float] = {}           # a role's side of the rink (_side)
         self._spot_of: dict[str, str] = {}           # supporter id -> his spot's name
         self._raw_prev: dict[str, np.ndarray] = {}   # the smoothing (_smooth): last raw target,
         self._steer: dict[str, np.ndarray] = {}      # ... last steering point,
         self._off: dict[str, np.ndarray] = {}        # ... and the jump still being blended out (and its rate)
         self._offv: dict[str, np.ndarray] = {}
+        self._avoid_f: dict[str, np.ndarray] = {}    # each skater's steering-round request, eased (_skate)
 
     def _side(self, key: str, x: float) -> float:
         """Which side of the rink's long axis (x = 0) a role is on: it changes only once x is
         SIDE_FLIP past the middle on the other side, so a skater near the middle doesn't flip it."""
         s = self._sides.get(key)
-        if s is None or x * s < -SIDE_FLIP:
+        if s is None or x * s < -(SIDE_FLIP if self.steady else 0.0):
             s = self._sides[key] = 1.0 if x >= 0 else -1.0
         return s
 
@@ -848,6 +859,10 @@ class Game:
         """Where each skater steers: his target, with any jump in it blended out (a critically damped
         spring with a SMOOTH_HALF half-life on the jump). A target that moves smoothly (a man he
         marks, a spot moving with the carrier) is followed exactly, with no lag."""
+        if not self.steady:
+            self._raw_prev, self._off, self._offv = {}, {}, {}
+            self._steer = {pid: np.asarray(tg, dtype=float) for pid, tg in targets.items()}
+            return dict(self._steer)
         y = 2.0 * math.log(2.0) / SMOOTH_HALF
         e = math.exp(-y * dt)
         out = {}
@@ -955,7 +970,8 @@ class Game:
             return sum(float(np.linalg.norm(p.pos - spots[n])) for p, n in zip(mates, assign))
         best = min(itertools.permutations(names, len(mates)), key=cost)
         now = tuple(self._spot_of.get(p.id) for p in mates)        # keep the spots they have, unless
-        if len(set(now)) == len(now) and all(n in spots for n in now) and cost(best) > SPOT_BETTER * cost(now):
+        if (self.steady and len(set(now)) == len(now) and all(n in spots for n in now)
+                and cost(best) > SPOT_BETTER * cost(now)):
             best = now                                             # ... another way is 20% shorter
         for p, n in zip(mates, best):
             self._spot_of[p.id] = n
@@ -971,8 +987,9 @@ class Game:
         net = self.arena.net(defend_end(team))
         by = {a.id: a for a in theirs}
         held = [self.marks.get(d.id) for d in mine]
-        if team != self._def_team or not all(a in by for a in held) or len(set(held)) < len(held):
-            self._def_team = team
+        if (team != self._def_team or not all(a in by for a in held) or len(set(held)) < len(held)
+                or (not self.steady and self.t - self._marks_t > 0.6)):
+            self._def_team, self._marks_t = team, self.t
             pairs = sorted(((float(np.linalg.norm(d.pos - a.pos)), d.id, a.id) for d in mine for a in theirs))
             if carrier is not None:                   # the carrier is taken first, by the nearest
                 pairs.sort(key=lambda x: (x[2] != carrier.id, x[0]))
@@ -981,7 +998,7 @@ class Game:
                 if d not in marks and a not in used:
                     marks[d], used = a, used | {a}
             self.marks.update(marks)
-        else:
+        elif self.steady:
             for d1, d2 in itertools.combinations(mine, 2):
                 a1, a2 = by[self.marks[d1.id]], by[self.marks[d2.id]]
                 if (float(np.linalg.norm(d1.pos - a2.pos)) < float(np.linalg.norm(d1.pos - a1.pos)) - SWAP_M and
@@ -1015,7 +1032,7 @@ class Game:
             times = {p.id: self._reach(p, path) for p in cands}
             chaser = min(cands, key=lambda p: times[p.id][0])
             was = self._prev_chasers.get(team)        # he keeps it unless a teammate is clearly sooner
-            if was in times and was != chaser.id and times[was][0] <= times[chaser.id][0] + CHASE_KEEP:
+            if self.steady and was in times and was != chaser.id and times[was][0] <= times[chaser.id][0] + CHASE_KEEP:
                 chaser = self.by_id[was]
             if self.pass_to in times:                 # a pass on its way: the receiver goes to it
                 chaser = self.by_id[self.pass_to]
@@ -1032,7 +1049,7 @@ class Game:
             home = {p.id: float(np.linalg.norm(p.pos - net_own)) for p in rest}
             back = min(rest, key=lambda p: home[p.id]) if rest else None
             was = self._back.get(team)                # he stays back unless a teammate is 2 m nearer home
-            if back is not None and was in home and home[was] <= home[back.id] + 2.0:
+            if self.steady and back is not None and was in home and home[was] <= home[back.id] + 2.0:
                 back = self.by_id[was]
             if back is not None:
                 self._back[team] = back.id
@@ -1061,7 +1078,9 @@ class Game:
             return float(self.TAUS[ok[0]]), path[ok[0]]
         return 2.0 + float(t_p[-1]), path[-1]
 
-    def _skate(self, p: Player, target, dt: float) -> None:
+    def _skate(self, p: Player, target, dt: float, avoid=None) -> None:
+        """Toward his target, inside his skating limits; `avoid`: requests to go round other AI
+        skaters and round you (_avoid), inside the same limits."""
         old = p.pos.copy()
         if target is None or self.state != "live":
             p.vel = p.vel * max(0.0, 1 - 4 * dt)
@@ -1071,13 +1090,31 @@ class Game:
             to = target - p.pos
             dist = float(np.linalg.norm(to))
             want = unit(to) * min(vmax, math.sqrt(2 * ACCEL * dist))
+            if self.steady:                           # going round people, eased in and out
+                a, b = (np.zeros(2), np.zeros(2)) if avoid is None else (avoid[0] * vmax, avoid[1] * vmax)
+                u = unit(want)
+                back = float(a @ u)
+                if back < 0:                          # another AI: never brake against where he's going, step round
+                    a = a - back * u
+                a = a + b                             # you: he may also slow for you
+                f = self._avoid_f.get(p.id, np.zeros(2))
+                f = f + (a - f) * min(1.0, dt / AVOID_EASE)
+                self._avoid_f[p.id] = f
+                want = _cap(want + f, vmax)
             dv = want - p.vel
             n = float(np.linalg.norm(dv))
             if n > ACCEL * dt:
                 dv *= ACCEL * dt / n
             p.vel = p.vel + dv
-        p.pos = self.arena.keep_on_ice(p.pos + p.vel * dt, 0.45)
-        p.pos = self._off_nets(p.pos)
+        free = p.pos + p.vel * dt
+        p.pos = self._off_nets(self.arena.keep_on_ice(free, 0.45))
+        if self.steady:                               # the boards or a net stopped him: no pushing on into them
+            fix = p.pos - free
+            n = float(np.linalg.norm(fix))
+            if n > 1e-9:
+                into = float(p.vel @ fix) / n
+                if into < 0:
+                    p.vel = p.vel - into * fix / n
         p.stride += float(np.linalg.norm(p.pos - old))
         speed = float(np.linalg.norm(p.vel))
         if p is self.holder or speed > 1.0:
@@ -1146,7 +1183,51 @@ class Game:
                 q = k.frame(f)
         return np.asarray(q, dtype=float)
 
+    def _avoid(self) -> dict[str, np.ndarray]:
+        """Steering round people (change 5): for each AI skater, (from the other AI, from you): a
+        request (in units of his top speed) away from anyone he'd pass closer than AVOID_M (another
+        AI, in the next AVOID_S) or AVOID_YOU_M (you, in the next AVOID_YOU_S), harder the closer
+        and sooner. Both of two AI skaters give way; you don't, so they go round you, starting 2 m
+        out (1 m when he's in your view and closing slowly). _skate keeps it inside his skating
+        limits."""
+        sk = self.players
+        if not self.steady or self.state != "live" or len(sk) < 1:
+            return {}
+        P = np.array([p.pos for p in sk])
+        V = np.array([p.vel for p in sk])
+        n = len(sk)
+        Q, W = P, V
+        Rm = np.full((n, n), AVOID_M)
+        y = self.you
+        if y is not None:
+            Q, W = np.vstack([P, y.pos]), np.vstack([V, y.vel])
+            rel = P - y.pos                           # from you to each of them
+            dist = np.maximum(np.linalg.norm(rel, axis=1), 1e-6)
+            seen = (rel @ y.facing) / dist > math.cos(math.radians(60))
+            closing = -((V - y.vel) * rel).sum(1) / dist
+            Rm = np.hstack([Rm, np.where(seen & (closing < 1.0), 1.0, AVOID_YOU_M)[:, None]])
+        r = Q[None, :, :] - P[:, None, :]            # (n, m, 2): to each other body
+        w = W[None, :, :] - V[:, None, :]
+        ww = np.maximum((w * w).sum(-1), 1e-9)
+        H = np.full(Rm.shape[1], AVOID_S)
+        if y is not None:
+            H[-1] = AVOID_YOU_S
+        tc = np.clip(-(r * w).sum(-1) / ww, 0.0, H)
+        c = r + w * tc[..., None]                    # where he'll be from me when we're closest
+        d = np.linalg.norm(c, axis=-1)
+        s = np.clip((Rm - d) / (Rm - BODY_MIN), 0.0, 1.0) * (1.0 - 0.5 * tc / H)
+        s[np.arange(n), np.arange(n)] = 0.0
+        head_on = d < 1e-3                           # straight at each other: each keeps to his right
+        away = np.where(head_on[..., None], np.stack([r[..., 1], -r[..., 0]], -1), -c)
+        away = away / np.maximum(np.linalg.norm(away, axis=-1, keepdims=True), 1e-9)
+        push = s[..., None] * away
+        ai = push[:, :n].sum(1)
+        you = push[:, n] if y is not None else np.zeros_like(ai)
+        return {p.id: (ai[i], you[i]) for i, p in enumerate(sk) if s[i].any()}
+
     def _separate(self) -> None:
+        if self.steady:
+            return self._separate_steady()
         sk = self.players
         for i in range(len(sk)):
             for j in range(i + 1, len(sk)):
@@ -1163,6 +1244,35 @@ class Game:
                 n = float(np.linalg.norm(d))
                 if n < SKATER_GAP:
                     a.pos = y.pos + unit(d if n > 1e-6 else np.array([1.0, 0.0])) * SKATER_GAP
+
+    def _separate_steady(self) -> None:
+        """Bodies closer than BODY_MIN (only when steering round failed): two AI skaters are eased
+        apart and stop closing; one on you is never moved, but turns to go away from you at least
+        as fast as you come on (no jump beside your head)."""
+        sk = self.players
+        for i in range(len(sk)):
+            for j in range(i + 1, len(sk)):
+                a, b = sk[i], sk[j]
+                d = b.pos - a.pos
+                n = float(np.linalg.norm(d))
+                if n < BODY_MIN:
+                    u = unit(d if n > 1e-6 else self.rng.normal(size=2))
+                    push = u * (BODY_MIN - n) / 2
+                    a.pos, b.pos = a.pos - push, b.pos + push
+                    closing = float((a.vel - b.vel) @ u)
+                    if closing > 0:
+                        a.vel, b.vel = a.vel - 0.5 * closing * u, b.vel + 0.5 * closing * u
+        y = self.you
+        if y is not None:
+            for a in sk:
+                d = a.pos - y.pos
+                n = float(np.linalg.norm(d))
+                if n < BODY_MIN:
+                    u = unit(d if n > 1e-6 else np.array([1.0, 0.0]))
+                    need = float(y.vel @ u) + 0.5
+                    along = float(a.vel @ u)
+                    if along < need:
+                        a.vel = a.vel + (need - along) * u
 
     # ------------------------------------------------------------------ for the app
     AI_COLS = ("x", "z", "vx", "vz", "fx", "fz", "bx", "bz", "tx", "tz", "rx", "rz", "mark")

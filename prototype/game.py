@@ -198,6 +198,7 @@ class GameMode(sandbox.SandboxMode):
             blade = zone.xz(blade_world) if blade_world is not None and gripping else None
             g.you_ms = self.play.tuning.values["skate"]
             g.react = self.play.tuning.values.get("react", threes.REACT_S)
+            g.steady = self.play.tuning.values.get("steady", 1.0) > 0
             g.update(t, blade, head, touch)
             self.log.row("ai", g.ai_header(), g.ai_row())  # every AI tick: selfplay_metrics.py reads it
         if g.outbox:

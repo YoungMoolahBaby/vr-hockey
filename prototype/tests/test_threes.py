@@ -278,6 +278,63 @@ def test_defenders_keep_their_men_and_swap_only_when_they_cross():
     assert any(e[0] == "log" and e[1] == "switch" for e in game.outbox)
 
 
+def _steer_only(game, movers, seconds, you_at=None):
+    """Only `movers` skate (to their targets: [(skater, target)]); the rest stand far off. Returns,
+    per tick, each mover's (position, how far he moved beyond his velocity)."""
+    ids = {p.id for p, _ in movers}
+    for o in game.players:
+        if o.id not in ids:
+            o.pos, o.vel = np.array([-9.0 + 3.0 * game.players.index(o), 6.0]), np.zeros(2)
+    if you_at is not None:
+        game.you.pos, game.you.vel, game.you.facing = np.array(you_at), np.zeros(2), np.array([0.0, 1.0])
+    out = []
+    dt = threes.AI_DT
+    for _ in range(int(seconds / dt)):
+        before = {p.id: p.pos.copy() for p, _ in movers}
+        avoid = game._avoid()
+        for p, target in movers:
+            game._skate(p, target, dt, avoid.get(p.id))
+        game._separate()
+        out.append({p.id: (p.pos.copy(), float(np.linalg.norm(p.pos - before[p.id] - p.vel * dt)))
+                    for p, _ in movers})
+    return out
+
+
+def test_two_skaters_meeting_head_on_go_round_each_other():
+    sim, game = make(seed=11)
+    game.start()
+    play(sim, game, 2.5)
+    a, b = game.by_id["T0"], game.by_id["T1"]
+    a.pos, a.vel = np.array([0.0, 20.0]), np.array([0.0, 2.5])
+    b.pos, b.vel = np.array([0.05, 30.0]), np.array([0.0, -2.5])
+    ticks = _steer_only(game, [(a, np.array([0.0, 32.0])), (b, np.array([0.0, 18.0]))], 4.0)
+    gaps = [float(np.linalg.norm(t["T0"][0] - t["T1"][0])) for t in ticks]
+    assert min(gaps) > 0.7                                    # they steer round, not into each other
+    assert max(r for t in ticks for _, r in t.values()) < 0.03    # and nobody is shoved
+    assert a.pos[1] > 30.5 and b.pos[1] < 19.5                # both get where they were going
+
+
+def test_an_ai_skater_goes_round_you_without_a_jump():
+    """His target is straight through you, standing still: he steers round, never jumps beside
+    your head (the old way snapped him to 0.9 m from you in one tick)."""
+    for steady in (True, False):
+        sim, game = make(you=True, seed=12)
+        game.start()
+        play(sim, game, 2.5, head=(np.array([0.0, 25.0]), np.array([0.0, 1.0])))
+        game.steady = steady
+        a = game.by_id["T0"]
+        a.pos, a.vel = np.array([0.0, 31.0]), np.array([0.0, -2.5])
+        ticks = _steer_only(game, [(a, np.array([0.0, 19.0]))], 5.0, you_at=(0.0, 25.0))
+        near = [(float(np.linalg.norm(t["T0"][0] - np.array([0.0, 25.0]))), t["T0"][1]) for t in ticks]
+        jumps = [r for d, r in near if d < 2.0 and r > 0.03]
+        if steady:
+            assert not jumps
+            assert min(d for d, _ in near) > 1.0                 # a metre clear of your head
+            assert a.pos[1] < 20.0                            # and on his way
+        else:
+            assert jumps                                      # the old snap, with the setting off
+
+
 def test_a_side_changes_past_the_middle_not_at_it():
     sim, game = make(seed=10)
     xs = [2.0, 0.5, -0.5, -1.0, -1.5, -0.5, 0.8, 1.3]
