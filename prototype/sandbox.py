@@ -363,12 +363,15 @@ def _plain(x):
 
 
 class Log:
-    """events.jsonl and puck.csv, written from any thread."""
+    """events.jsonl and puck.csv, written from any thread; and any other table a mode keeps
+    (row(): the 3v3 writes ai.csv)."""
 
     def __init__(self, run_dir: Path):
+        self.dir = run_dir
         self.events = open(run_dir / "events.jsonl", "a", encoding="utf-8")
         self.puck = open(run_dir / "puck.csv", "w", encoding="utf-8")
         self.puck.write("t,px,py,pz,vx,vy,vz,impulse,stick,bend_mm,hands\n")   # hands: the damping in use
+        self.tables: dict = {}
         self.lock = threading.Lock()
 
     def event(self, t: float, kind: str, **data) -> None:
@@ -380,10 +383,21 @@ class Log:
         with self.lock:
             self.puck.write(row)
 
+    def row(self, name: str, header: str, row: str) -> None:
+        """A row of <name>.csv, opened (with its header) on the first row."""
+        with self.lock:
+            f = self.tables.get(name)
+            if f is None:
+                f = self.tables[name] = open(self.dir / f"{name}.csv", "w", encoding="utf-8")
+                f.write(header)
+            f.write(row)
+
     def close(self) -> None:
         with self.lock:
             self.events.close()
             self.puck.close()
+            for f in self.tables.values():
+                f.close()
 
 
 # ----------------------------------------------------------------------------- physics (sampler thread)

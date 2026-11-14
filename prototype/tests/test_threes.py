@@ -68,7 +68,7 @@ def test_a_puck_stopped_behind_the_net_gets_dug_out():
     for p in game.players:
         p.cool_until = 0.0
     log = play(sim, game, 6.0, t0=game.t + 0.001)
-    assert game.holder is not None or game.state != "live"
+    assert any(e[0] == "log" and e[1] == "take" for e in log)    # somebody dug it out
     assert not any(e[0] == "say" and "Dead puck" in e[1] for e in log)
 
 
@@ -128,6 +128,9 @@ def test_an_ai_tick_is_cheap():
 
 
 class _Quiet:
+    def __init__(self):
+        self.tables = {}
+
     def say(self, *a, **k):
         pass
 
@@ -136,6 +139,85 @@ class _Quiet:
 
     def puck_row(self, *a, **k):
         pass
+
+    def row(self, name, header, row):
+        self.tables.setdefault(name, [header]).append(row)
+
+
+def _ai_carries(game, pid="T0", at=(2.0, 30.0), facing=(0.0, -1.0)):
+    """Give an AI skater the puck in open ice, everyone else far away, no decision for a while."""
+    h = game.by_id[pid]
+    for k, o in enumerate(game.players):
+        if o is not h:
+            o.pos, o.vel = np.array([-8.0 + 2.5 * k, 8.0]), np.zeros(2)
+    h.pos, h.vel, h.facing = np.array(at), np.zeros(2), np.array(facing)
+    h.next_decide = game.t + 10.0
+    game.holder, game.yours, game.pass_to = h, False, None
+    game._carry()
+    return h
+
+
+def test_the_carried_puck_sits_on_the_drawn_blade():
+    """The puck rides on the forehand of the blade the figure draws (it used to float 0.4 m ahead of it)."""
+    import figures
+    sim, game = make(seed=5)
+    zone = game.arena.zone
+    for shoots in ("L", "R"):
+        for f in ((0.0, 1.0), (0.6, -0.8)):
+            h = game.by_id["T0"]
+            h.shoots = shoots
+            _ai_carries(game, facing=f)
+            segs = []
+            figures.skater(lambda a, b, c: segs.append((np.asarray(a), np.asarray(b))), zone, h.pos, h.facing,
+                           figures.THEM, shoots, ring=False)
+            o = zone.to_world(h.pos[0], 0.0, h.pos[1])
+            blade = [(a, b) for a, b in segs if a[1] < 0.03 and b[1] < 0.03
+                     and np.hypot(*(a - o)[[0, 2]]) > 0.7]               # the stick's blade, on the ice out front
+            assert len(blade) == 1
+            a, b = blade[0]
+            q = zone.to_world(*(lambda c: (c[0], 0.0, c[1]))(game._carry_point(h)))
+            s = np.clip((q - a) @ (b - a) / ((b - a) @ (b - a)), 0.0, 1.0)
+            gap = float(np.linalg.norm((a + s * (b - a) - q)[[0, 2]]))
+            assert gap < 0.05, (shoots, f, gap)
+            side = (q - o)[[0, 2]] @ np.array(zone.dir_to_world(f[1], -f[0]))[[0, 2]]
+            assert side * (1 if shoots == "L" else -1) > 0.1          # out on his shooting side
+
+
+def test_a_touch_of_your_blade_knocks_the_puck_off_an_ai_carrier():
+    """Any contact you'd hear (the physics' impulse over TOUCH_MS) and the puck is loose: a light
+    poke counts. Less than that, and he keeps it."""
+    sim, game = make(you=True, seed=3)
+    game.start()
+    head = (np.array([-6.0, 12.0]), np.array([0.0, 1.0]))
+    play(sim, game, 2.5, head=head)
+    for touch, lost in ((0.05, False), (0.3, True)):
+        h = _ai_carries(game)
+        game.outbox.clear()
+        t = game._last_ai + threes.AI_DT
+        game.update(t - 0.01, touch=touch)                 # the touch lands between AI ticks
+        game.update(t, None, head)
+        logs = [e for e in game.outbox if e[0] == "log" and e[1] == "lost"]
+        assert (game.holder is not h) == lost
+        assert bool(logs) == lost
+        if lost:
+            assert logs[0][2] == {"from": "T0", "by": "you"}
+            assert h.cool_until > t                         # he can't just pick it up again
+
+
+def test_the_ai_log_has_a_field_for_every_column():
+    sim, game = make(you=True, seed=6)
+    head = (np.array([1.0, 20.0]), np.array([0.0, 1.0]))
+    cols = game.ai_header().strip().split(",")
+    rows = [game.ai_row()]
+    game.start()
+    play(sim, game, 3.0, head=head, blade=head[0] + np.array([0.3, 0.9]))
+    rows.append(game.ai_row())
+    assert game.state == "live"
+    for r in rows:
+        assert len(r.strip().split(",")) == len(cols)
+    row = dict(zip(cols, rows[-1].strip().split(",")))
+    assert row["state"] == "live" and float(row["you_x"]) == 1.0 and row["T0_bx"] != ""
+    assert any(row[f"{p}_tx"] != "" for p in ("U1", "U2", "T0", "T1", "T2"))
 
 
 def test_the_app_runs_headless():
@@ -147,7 +229,8 @@ def test_the_app_runs_headless():
     import stickspec
     spec = stickspec.from_height(1.73, "left")
     play = sandbox.Play(sandbox.Tuning(spec, sandbox.Tuning.defaults(spec, grab.Fit(), pk.Params())))
-    mode = gm.GameMode(play, _Quiet(), _Quiet())
+    log = _Quiet()
+    mode = gm.GameMode(play, _Quiet(), log)
     physics = mode.make_physics()
     play.head = (np.eye(3), np.array([0.0, 1.6, 0.0]))       # looking down -z
     mode.first_head()
@@ -166,6 +249,8 @@ def test_the_app_runs_headless():
     at, facing = play.want_teleport
     assert np.allclose(at[[0, 2]], [0.0, 0.0], atol=1e-6)    # ... which is where you stood
     assert np.allclose(facing[[0, 2]], [0.0, -1.0], atol=1e-6)
+    ai = log.tables["ai"]                                    # ai.csv: a header, then a row every AI tick
+    assert ai[0] == g.ai_header() and 140 < len(ai) - 1 < 160
     drawn = mode.draw({"r": hand}, {"r": True}, (None, None), grab.TOP)
     verts = drawn.lines
     assert drawn.tris.shape[1] == 6 and len(drawn.tris) > 1000           # the solid rink

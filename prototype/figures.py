@@ -15,6 +15,7 @@ import numpy as np
 
 import gear
 import theme
+from threes import BLADE_AT
 
 US, THEM, YOU = theme.US, theme.THEM, (1.0, 0.9, 0.2)     # YOU: on the drills' dark map only
 _C = np.linspace(0, 2 * np.pi, 13)
@@ -72,12 +73,13 @@ def _local_cached(shoots: str, stride: float, speed: float, ring: bool, blades: 
         seg((hx, c[i], hy + s[i]), (hx, c[i + 1], hy + s[i + 1]))
     k = 1.0 if shoots == "L" else -1.0                  # his blade on his shooting side
     top, bot = (lean * 0.8 + 0.2, -0.1 * k, 1.12), (lean * 0.5 + 0.45, 0.2 * k, 0.82)
-    heel, toe = (1.05, 0.42 * k, 0.02), (1.12, 0.12 * k, 0.02)
+    mf, ms = BLADE_AT[0], BLADE_AT[1] * k               # the blade's middle: where the game carries his puck
+    heel, toe = (mf - 0.04, ms + 0.15 * k, 0.02), (mf + 0.04, ms - 0.15 * k, 0.02)
     seg((lean, -0.23 * k, 1.4), top)                    # arms
     seg((lean, 0.23 * k, 1.4), bot)
     seg(top, heel)                                      # shaft (through the bottom hand, near enough)
     seg(heel, toe)
-    seg((1.05, 0.42 * k, 0.07), (1.12, 0.12 * k, 0.07))
+    seg((heel[0], heel[1], 0.07), (toe[0], toe[1], 0.07))
     A, B = np.array(A), np.array(B)
     if ring:
         A, B = np.vstack([A, _RING_A]), np.vstack([B, _RING_B])

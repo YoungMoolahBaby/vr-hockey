@@ -7,8 +7,13 @@ Arena frame as in arena.py: z runs from the home end boards. Your team ("us") de
 and attacks the far one; "them" the other way.
 
 The puck is the real puck of the 1 kHz physics. An AI skater with the puck carries it on his stick
-(the game puts it there, moving with him, 50 times a second), so your stick can knock it off him.
-An AI pass or shot is the puck sent off at a speed; a goal is the puck in a net.
+(the game puts it there, just in front of his drawn blade and moving with him, 50 times a second).
+Any touch of your blade on it knocks it loose: update()'s `touch` is the physics' contact. An AI
+pass or shot is the puck sent off at a speed; a goal is the puck in a net.
+
+What the AI does is logged: ai_row() every AI tick (game.py writes it to ai.csv), and takes,
+passes, shots, losses and fumbled catches in the outbox's log items. selfplay_metrics.py scores
+both against reports/Lifelike AI players.md.
 
 The AI, 50 times a second:
 - possession: the puck is carried (by an AI skater, or by you: near your blade and slow), loose,
@@ -39,8 +44,11 @@ import zone as zn
 AI_DT = 0.02             # s: the AI's tick
 VMAX, ACCEL = 5.8, 5.0   # rec skaters (and never faster than YOU_FRAC of your own top speed)
 YOU_FRAC = 0.95
-CARRY = 0.85             # a carrier skates at this much of VMAX
-STICK_R = 0.75           # m: a skater's blade, in front of him
+CARRY = 0.95             # a carrier skates at this much of VMAX (U16 national-team players: 4-5% slower with the puck)
+STICK_R = 0.75           # m: how far ahead of him a skater's stick reaches a loose puck (_reach)
+BLADE_AT = (0.94, 0.22)  # m: the middle of a skater's blade on the ice, ahead of him and out to his shooting side (figures.py draws it here)
+CARRY_AHEAD = pk.R + 0.01  # m: a carried puck sits this far ahead of the blade's middle (on its forehand face)
+TOUCH_MS = 0.15          # m/s: your blade touching an AI's puck this hard (a contact you'd hear) knocks it loose
 PICKUP_R = 0.6           # m: a loose puck this close to an AI blade is his
 YOURS_R = 0.6            # m: the puck this close to your blade, and moving with it, is yours
 POKE_R = 1.3             # m: a defender's stick reaches the puck from this close
@@ -83,6 +91,27 @@ def defend_end(team: str) -> str:
     return "home" if team == "us" else "far"
 
 
+def blade_point(pos, facing, shoots: str) -> np.ndarray:
+    """The middle of a skater's blade on the ice: BLADE_AT ahead of him and out to his shooting side
+    (a left shot carries it on his left; the left of a facing f is (fz, -fx), as in figures.py)."""
+    f = unit(facing)
+    k = 1.0 if shoots == "L" else -1.0
+    return np.asarray(pos, dtype=float) + BLADE_AT[0] * f + (BLADE_AT[1] * k) * np.array([f[1], -f[0]])
+
+
+def lane_odds(a, b, opps, speed: float, reach: float, vmax: float) -> float:
+    """The chance a puck from a to b at `speed` gets past every opponent (at the positions `opps`)
+    whose stick reaches `reach` and who skates at up to `vmax`."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    p = 1.0
+    for o in opps:
+        d, s = seg_dist(np.asarray(o, dtype=float), a, b)
+        t_puck = s / speed
+        t_opp = max(0.0, d - reach) / vmax + 0.25
+        p *= float(gl.sig((t_opp - t_puck) / 0.12))
+    return p
+
+
 def seg_dist(p, a, b) -> tuple[float, float]:
     """(distance from p to segment ab, how far along it the nearest point is, m)."""
     ab = b - a
@@ -106,7 +135,7 @@ class Player:
     blade: np.ndarray | None = None      # you: where your blade really is
 
     def stick(self) -> np.ndarray:
-        return self.blade if self.blade is not None else self.pos + STICK_R * self.facing
+        return self.blade if self.blade is not None else blade_point(self.pos, self.facing, self.shoots)
 
 
 class Keeper:
@@ -262,10 +291,11 @@ class Goalies:
 
 
 class Game:
-    """One game. update(t, blade, head) every physics tick; t in seconds.
+    """One game. update(t, blade, head, touch) every physics tick; t in seconds.
 
     blade: arena (x, z) of your blade's sweet spot, or None (not holding the stick);
-    head: (arena (x, z) of your head, arena direction you face), or None.
+    head: (arena (x, z) of your head, arena direction you face), or None;
+    touch: your blade's biggest contact with the puck this physics tick (m/s, the physics' impulse).
     Voice, sounds, buzz, log items and teleports collect in `outbox`."""
 
     def __init__(self, arena: ar.Arena, puck: ar.ArenaPuck, rng=None, to_goals: int = 5, you: bool = True,
@@ -298,6 +328,10 @@ class Game:
         self._dead_since: float | None = None
         self._slow_since: float | None = None
         self._you_had = False
+        self._touch = 0.0                # your blade's biggest touch on the puck since the last AI tick (m/s)
+        self.targets: dict[str, np.ndarray] = {}     # where each AI skater was steering, last AI tick
+        self.chasers: dict[str, str] = {}            # a loose puck: who each team sent for it
+        self._ai_header: str | None = None
         self.t = 0.0
         self.outbox: list[tuple] = []
         self.stats = {"shots": {"us": 0, "them": 0}, "goals": [], "saves": {"home": 0, "far": 0},
@@ -310,8 +344,9 @@ class Game:
         return top * (0.85 + 0.15 * self.level)
 
     # ------------------------------------------------------------------ the tick
-    def update(self, t: float, blade=None, head=None) -> None:
+    def update(self, t: float, blade=None, head=None, touch: float = 0.0) -> None:
         self.t = t
+        self._touch = max(self._touch, touch)
         if self.state == "live":                      # every tick: shots at a goalie, goals
             if self._watch is not None:
                 self._check_keeper(self.keepers[self._watch])
@@ -322,6 +357,8 @@ class Game:
             return
         dt = AI_DT if self._last_ai < 0 else min(t - self._last_ai, 0.1)
         self._last_ai = t
+        touch, self._touch = self._touch, 0.0
+        self.targets, self.chasers = {}, {}
         self._you_update(blade, head, dt)
         pxz, pv = self._puck()
         if self.state in ("ready", "faceoff"):
@@ -332,9 +369,9 @@ class Game:
             if t - self.state_t >= GOAL_PAUSE:
                 self.faceoff()
         elif self.state == "live":
-            self._possession(pxz, pv, dt)
+            self._possession(pxz, pv, dt, touch)
             pxz, pv = self._puck()
-            targets = self._targets(pxz, pv)
+            targets = self.targets = self._targets(pxz, pv)
             for p in self.players:
                 self._skate(p, targets.get(p.id), dt)
             self._separate()
@@ -461,7 +498,7 @@ class Game:
             self.faceoff(say="Dead puck.")
 
     # ------------------------------------------------------------------ who has the puck
-    def _possession(self, pxz, pv, dt: float) -> None:
+    def _possession(self, pxz, pv, dt: float, touch: float = 0.0) -> None:
         h, t, rng = self.holder, self.t, self.rng
         y = float(self.puck.pos[1])
         if isinstance(h, Keeper):
@@ -469,9 +506,11 @@ class Game:
                 self._keeper_plays(h)
             return
         if isinstance(h, Player):
-            if (float(np.linalg.norm(pxz - self._carry_point(h))) > 0.5
-                    or float(np.linalg.norm(pv - h.vel)) > 3.0):     # knocked off his stick (by you)
-                self._lose(h, by="you" if h.team == "them" else None)
+            if touch > TOUCH_MS:                      # your blade touched it: it's loose
+                self._lose(h, by="you")
+            elif (float(np.linalg.norm(pxz - self._carry_point(h))) > 0.5
+                    or float(np.linalg.norm(pv - h.vel)) > 3.0):     # knocked off his stick (the boards, a net)
+                self._lose(h, by=None)
             else:
                 k = self.keepers[attack_end(h.team)]          # in alone on the goalie: he smothers it
                 if (t >= k.calm_until and float(np.linalg.norm(self._carry_point(h) - k.pos)) < 0.8
@@ -562,10 +601,13 @@ class Game:
             self._take(best)
         else:
             best.cool_until = t + 0.3                 # it got past his stick
+            self.outbox.append(("log", "fumble", {"by": best.id, "rel_ms": round(rel, 1)}))
 
     def _take(self, p: Player) -> None:
-        if self.last_team is not None and self.last_team != p.team:
+        turnover = self.last_team is not None and self.last_team != p.team
+        if turnover:
             self.stats["turnovers"] += 1
+        self.outbox.append(("log", "take", {"by": p.id, "pass": self.pass_to == p.id, "turnover": turnover}))
         self.holder, self.pass_to, self._watch = p, None, None
         self.last_touch, self.last_team = p.id, p.team
         p.next_decide = self.t + self.rng.uniform(0.15, 0.35)
@@ -584,8 +626,9 @@ class Game:
         o.cool_until = self.t
 
     def _carry_point(self, h: Player) -> np.ndarray:
-        """Where a carrier's puck sits: on his blade, but never in the boards or a net."""
-        return self._off_nets(self.arena.keep_on_ice(h.stick(), pk.R + 0.02), pk.R + 0.02)
+        """Where a carrier's puck sits: on his blade's forehand, but never in the boards or a net."""
+        at = h.stick() + CARRY_AHEAD * unit(h.facing)
+        return self._off_nets(self.arena.keep_on_ice(at, pk.R + 0.02), pk.R + 0.02)
 
     def _carry(self) -> None:
         h = self.holder
@@ -719,14 +762,7 @@ class Game:
 
     def _lane(self, a, b, opps, speed: float, reach: float) -> float:
         """The chance a puck from a to b at `speed` gets past every opponent's stick."""
-        a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-        p = 1.0
-        for o in opps:
-            d, s = seg_dist(o.pos, a, b)
-            t_puck = s / speed
-            t_opp = max(0.0, d - reach) / self.vmax + 0.25
-            p *= float(gl.sig((t_opp - t_puck) / 0.12))
-        return p
+        return lane_odds(a, b, [o.pos for o in opps], speed, reach, self.vmax)
 
     def _shoot(self, h: Player, k: Keeper, o_f, aim) -> None:
         a = gl.aimed(self.rng, aim, o_f, WILD / max(self.level, 0.3))
@@ -854,6 +890,7 @@ class Game:
                     chaser = None
             if chaser is not None:
                 out[chaser.id] = times[chaser.id][1]
+                self.chasers[team] = chaser.id
             rest = [p for p in cands if p is not chaser]
             net_own = self.arena.net(defend_end(team))
             net_att = self.arena.net(attack_end(team))
@@ -985,6 +1022,42 @@ class Game:
                     a.pos = y.pos + unit(d if n > 1e-6 else np.array([1.0, 0.0])) * SKATER_GAP
 
     # ------------------------------------------------------------------ for the app
+    AI_COLS = ("x", "z", "vx", "vz", "fx", "fz", "bx", "bz", "tx", "tz", "mark")
+
+    def ai_header(self) -> str:
+        """ai.csv's header: the game, the puck, you, then each AI skater (position, velocity,
+        facing, blade, where he's steering and the man he marks), then the goalies. Arena (x, z)."""
+        if self._ai_header is None:
+            cols = ["t", "state", "holder", "pass_to", "vmax", "px", "py", "pz", "pvx", "pvz",
+                    "you_x", "you_z", "you_fx", "you_fz", "you_bx", "you_bz", "chase_us", "chase_them"]
+            for p in self.players:
+                cols += [f"{p.id}_{c}" for c in self.AI_COLS]
+            cols += ["home_x", "home_z", "far_x", "far_z"]
+            self._ai_header = ",".join(cols) + "\n"
+        return self._ai_header
+
+    def ai_row(self) -> str:
+        """This AI tick as a row of ai.csv (an empty field: none, or not known)."""
+        def f(*v) -> list[str]:
+            return [f"{float(x):.3f}" for x in v]
+        h = self.holder
+        who = h.id if isinstance(h, Player) else (h.end if isinstance(h, Keeper) else ("you" if self.yours else ""))
+        pxz, pv = self._puck()
+        row = [f"{self.t:.4f}", self.state, who, self.pass_to or "", f"{self.vmax:.3f}",
+               *f(pxz[0], self.puck.pos[1], pxz[1], pv[0], pv[1])]
+        y = self.you
+        row += f(*y.pos, *y.facing) if y is not None else [""] * 4
+        row += f(*y.blade) if y is not None and y.blade is not None else ["", ""]
+        row += [self.chasers.get("us", ""), self.chasers.get("them", "")]
+        for p in self.players:
+            tg = self.targets.get(p.id)
+            row += f(*p.pos, *p.vel, *p.facing, *p.stick())
+            row += f(*tg) if tg is not None else ["", ""]
+            row.append(self.marks.get(p.id, "") if self.state == "live" else "")
+        for k in (self.keepers["home"], self.keepers["far"]):
+            row += f(*k.pos)
+        return ",".join(row) + "\n"
+
     def status(self) -> str:
         h = self.holder
         who = h.id if isinstance(h, Player) else (f"goalie {h.end}" if isinstance(h, Keeper) else

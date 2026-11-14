@@ -15,8 +15,8 @@ saves them (the comfort ones too: the game uses them).
 You start at centre ice, facing the far net: that's the one you attack; your goalie is behind
 you. Press A to drop the puck. Your teammates (blue) pass to you when you're open; the other
 team (orange) marks you, goal side, and pokes at the puck when you carry it. Skate into their
-carrier to knock it off him, or knock it off his stick with yours. After a goal everyone lines up
-at centre again (you're moved there).
+carrier to knock it off him, or get your stick on it: any touch knocks it loose. After a goal
+everyone lines up at centre again (you're moved there).
 
 Controls
   grip buttons                  hold the stick (as in the sandbox)
@@ -39,8 +39,9 @@ of flying off; swing faster than the shot release speed (relative to you, so ska
 and it comes off as hit. The other team is never faster than 95% of your skate speed.
 
 The game is threes.py (the AI and the rules), arena.py (the rink), goalie.py (the goalies).
-Recorded to data/game-<timestamp>/ like the sandbox: every pass, shot, save and goal in
-events.jsonl, the score and stats in meta.json.
+Recorded to data/game-<timestamp>/ like the sandbox: every take, pass, shot, save and goal in
+events.jsonl, every AI tick in ai.csv (the skaters, the puck, you; selfplay_metrics.py scores a
+game from them), the score and stats in meta.json.
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ class GamePhysics(sandbox.Physics):
             for kind, speed in pz.events:
                 pl.bus.publish(Contact(now, kind, speed))          # boards and posts play from the bus
             pz.events.clear()
-        self.mode.tick(t, self.blade, self.gripping)
+        self.mode.tick(t, self.blade, self.gripping, imp)
 
 
 class GameMode(sandbox.SandboxMode):
@@ -181,12 +182,13 @@ class GameMode(sandbox.SandboxMode):
         return vel
 
     # ---- the game (physics thread, every tick)
-    def tick(self, t: float, blade_world, gripping: bool) -> None:
+    def tick(self, t: float, blade_world, gripping: bool, touch: float = 0.0) -> None:
+        """touch: your blade's contact with the puck this tick (m/s): any touch knocks it off an AI."""
         g = self.game
         if g is None:
             return
-        if t - g._last_ai < threes.AI_DT:                # between the AI's ticks: only shots and goals
-            g.update(t)
+        if t - g._last_ai < threes.AI_DT:                # between the AI's ticks: only touches, shots and goals
+            g.update(t, touch=touch)
         else:
             zone = self.arena.zone
             head = None
@@ -195,7 +197,8 @@ class GameMode(sandbox.SandboxMode):
                 head = (zone.xz(ph), zone.dir_to_zone(-Rh[:, 2]))
             blade = zone.xz(blade_world) if blade_world is not None and gripping else None
             g.you_ms = self.play.tuning.values["skate"]
-            g.update(t, blade, head)
+            g.update(t, blade, head, touch)
+            self.log.row("ai", g.ai_header(), g.ai_row())  # every AI tick: selfplay_metrics.py reads it
         if g.outbox:
             self._drain(t, g)
 

@@ -362,7 +362,8 @@ You and two AI teammates (blue) against three (orange), with a goalie in each ne
   your 4).
 - Your teammates pass to you when you're open (a pass is led to your blade).
 - The other team marks you goal side and pokes at the puck while you carry it.
-- To get the puck back, knock it off their carrier's stick with yours, or skate into him.
+- To get the puck back, get your stick on it or skate into their carrier. His puck rides on the
+  blade you see, just off his forehand, and any touch of your blade knocks it loose.
 
 **The AI** (`threes.py`) ticks 50 times a second:
 - **The carrier** skates for the slot, away from defenders. Every quarter second or so he shoots,
@@ -375,6 +376,17 @@ You and two AI teammates (blue) against three (orange), with a goalie in each ne
   covers it and plays it out a second later.
 - **AI against AI** (no you): about 1.4 goals a minute and 28% shooting. Shots are even between the
   teams over 16 games.
+
+**Measuring the AI** (`selfplay_metrics.py`, from reports/Lifelike AI players.md): every game
+records the AI 50 times a second in `ai.csv` (the skaters, the puck, you) and its takes, passes,
+shots and losses in `events.jsonl`. The script scores a game against the report's table (baseline,
+now, target), or plays the AI against itself and scores that:
+
+```
+uv run python selfplay_metrics.py                          # 4 self-play games of 600 s (about a minute)
+uv run python selfplay_metrics.py --set CARRY=0.85         # an A/B: one of threes.py's constants changed
+uv run python selfplay_metrics.py data/game-<timestamp>    # a game you played
+```
 
 **Controls:**
 - **A:** drop the puck (a new game when one is over)
@@ -460,7 +472,8 @@ Next: tuning, after the feel research (`../reports/`).
 | `powerplay.py` | the power-play drill's logic: the box's reads, expected goals per play, the rep with real shots and one-timers |
 | `goalie.py` | a rec goalie: angle, screens, saves, and expected goals from the same model |
 | `game.py` | the 3-on-3 app (a sandbox mode): lays out the rink, runs the game, draws the skaters, goalies and score; `--free` for free skate on the same rink |
-| `threes.py` | the 3-on-3 game's logic, without XR: possession, the AI's choices and positions, both goalies, faceoffs, goals |
+| `threes.py` | the 3-on-3 game's logic, without XR: possession, the AI's choices and positions, both goalies, faceoffs, goals; its log (`ai.csv`) |
+| `selfplay_metrics.py` | the AI in numbers: self-play or a recorded game, scored against reports/Lifelike AI players.md |
 | `arena.py` | the whole rink: both ends from zone.py (the far one turned round), its puck (both nets), markings, the scoreboard |
 | `theme.py` | the look: a white rink aboard a mothership. Solid ice, boards, painted lines, the hull and a ring of light overhead, as triangles under the line drawing; the palette, given as the colours the headset shows |
-| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out), and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |
+| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |
