@@ -70,6 +70,7 @@ ARRIVE = 0.7 * STOP      # m/s^2: a skater slows to arrive where he's going at t
 JERK = 40.0              # m/s^3: his push (or stop) builds this fast: 6 m/s^2 over 0.15 s, never a step
 EASE = 0.1               # s: a push eases into the speed he wants over about this (as rig.EASE)
 STOP_ANGLE, STOP_DONE = 120.0, 0.3   # deg, m/s: wanting to go this far from where he's going is a hockey stop, down to this
+_COS_STOP = math.cos(math.radians(STOP_ANGLE))
 SKATE_LIKE_YOU = True    # change 6 (the "AI skating" setting): on your skating model; off, the old single ACCEL cap
 YOU_FRAC = 0.95
 CARRY = 0.95             # a carrier skates at this much of VMAX (U16 national-team players: 4-5% slower with the puck)
@@ -432,6 +433,8 @@ class Game:
         self.raw_targets: dict[str, np.ndarray] = {}  # where each was going before the smoothing (self.targets: after)
         self._roles_reset()
         self._ai_header: str | None = None
+        self._top: float | None = None       # this tick's vmax and puck (arena x, z), while the skaters skate
+        self._pxz: np.ndarray | None = None
         self.t = 0.0
         self.outbox: list[tuple] = []
         self.stats = {"shots": {"us": 0, "them": 0}, "goals": [], "saves": {"home": 0, "far": 0},
@@ -476,8 +479,10 @@ class Game:
             self.raw_targets = self._react(self._targets(pxz, pv), pxz)
             targets = self.targets = self._smooth(self.raw_targets, dt)
             avoid = self._avoid()
+            self._top, self._pxz = self.vmax, self._puck()[0]   # this tick's, for every skater
             for p in self.players:
                 self._skate(p, targets.get(p.id), dt, avoid.get(p.id))
+            self._top = self._pxz = None
             self._separate()
             self._carry()
             pxz, pv = self._puck()
@@ -933,33 +938,44 @@ class Game:
     def _smooth(self, targets: dict, dt: float) -> dict:
         """Where each skater steers: his target, with any jump in it blended out (a critically damped
         spring with a SMOOTH_HALF half-life on the jump). A target that moves smoothly (a man he
-        marks, a spot moving with the carrier) is followed exactly, with no lag."""
+        marks, a spot moving with the carrier) is followed exactly, with no lag. (Plain floats: it
+        runs for every skater every tick.)"""
+        out = {}
         if not self.steady:
             for pid, tg in targets.items():
+                rx, rz = float(tg[0]), float(tg[1])
                 prev = self._steer.get(pid)
-                step = None if prev is None else np.asarray(tg, dtype=float) - prev
-                self._tvel[pid] = step / dt if step is not None and _n(step) <= JUMP_M else np.zeros(2)
+                if prev is not None and math.hypot(rx - prev[0], rz - prev[1]) <= JUMP_M:
+                    self._tvel[pid] = ((rx - prev[0]) / dt, (rz - prev[1]) / dt)
+                else:
+                    self._tvel[pid] = (0.0, 0.0)
+                self._steer[pid] = (rx, rz)
+                out[pid] = np.array([rx, rz])
             self._raw_prev, self._off, self._offv = {}, {}, {}
-            self._steer = {pid: np.asarray(tg, dtype=float) for pid, tg in targets.items()}
-            return dict(self._steer)
+            return out
         y = 2.0 * math.log(2.0) / SMOOTH_HALF
         e = math.exp(-y * dt)
-        out = {}
-        for pid, raw in targets.items():
-            raw = np.asarray(raw, dtype=float)
-            prev, off, offv = self._raw_prev.get(pid), self._off.get(pid), self._offv.get(pid)
-            if off is None:
-                off, offv = np.zeros(2), np.zeros(2)
+        for pid, tg in targets.items():
+            rx, rz = float(tg[0]), float(tg[1])
+            prev = self._raw_prev.get(pid)
+            ox, oz = self._off.get(pid, (0.0, 0.0))
+            vx, vz = self._offv.get(pid, (0.0, 0.0))
             if prev is None:                          # no target last tick: blend in from where he was steering
                 last = self._steer.get(pid)
-                off = (last - raw) if last is not None else np.zeros(2)
-            elif _n(raw - prev) > JUMP_M:
-                off = off + (prev - raw)              # it jumped: start from where he was going
-            self._tvel[pid] = (raw - prev) / dt if prev is not None and _n(raw - prev) <= JUMP_M else np.zeros(2)
-            j1 = offv + off * y
-            off, offv = e * (off + j1 * dt), e * (offv - j1 * y * dt)
-            self._raw_prev[pid], self._off[pid], self._offv[pid] = raw, off, offv
-            out[pid] = self._steer[pid] = raw + off
+                ox, oz = (last[0] - rx, last[1] - rz) if last is not None else (0.0, 0.0)
+                self._tvel[pid] = (0.0, 0.0)
+            else:
+                jx, jz = rx - prev[0], rz - prev[1]
+                if math.hypot(jx, jz) > JUMP_M:
+                    ox, oz = ox - jx, oz - jz         # it jumped: start from where he was going
+                    self._tvel[pid] = (0.0, 0.0)
+                else:
+                    self._tvel[pid] = (jx / dt, jz / dt)
+            j1x, j1z = vx + ox * y, vz + oz * y
+            ox, oz, vx, vz = e * (ox + j1x * dt), e * (oz + j1z * dt), e * (vx - j1x * y * dt), e * (vz - j1z * y * dt)
+            self._raw_prev[pid], self._off[pid], self._offv[pid] = (rx, rz), (ox, oz), (vx, vz)
+            self._steer[pid] = (rx + ox, rz + oz)
+            out[pid] = np.array([rx + ox, rz + oz])
         for pid in list(self._raw_prev):              # no target this tick (he coasts): start afresh next time
             if pid not in targets:
                 del self._raw_prev[pid]
@@ -1133,7 +1149,7 @@ class Game:
             cands = [p for p in self.players if p.team == team]
             if not cands:
                 continue
-            times = {p.id: self._reach(p, path) for p in cands}
+            times = self._reach_all(cands, path)
             chaser = min(cands, key=lambda p: times[p.id][0])
             was = self._prev_chasers.get(team)        # he keeps it unless a teammate is clearly sooner
             if self.steady and was in times and was != chaser.id and times[was][0] <= times[chaser.id][0] + CHASE_KEEP:
@@ -1189,6 +1205,22 @@ class Game:
         P = pxz + unit(pv)[None, :] * s[:, None]
         return np.array([self.arena.keep_on_ice(q, 0.3) for q in P]) if speed > 0.3 else np.repeat(pxz[None], len(self.TAUS), 0)
 
+    def _reach_all(self, ps: list, path: np.ndarray) -> dict:
+        """_reach for several skaters at once: {id: (how soon, where)}."""
+        if not self.skate_like_you:
+            return {p.id: self._reach(p, path) for p in ps}
+        P = np.array([p.pos for p in ps])
+        V = np.array([p.vel for p in ps])
+        rel = path[None, :, :] - P[:, None, :]       # (n, 21, 2)
+        d = np.sqrt((rel * rel).sum(-1))
+        v0 = (rel * V[:, None, :]).sum(-1) / np.maximum(d, 1e-6)
+        T = time_to(np.maximum(0.0, d - STICK_R), v0, self.vmax) + 0.1
+        out = {}
+        for i, p in enumerate(ps):
+            ok = np.flatnonzero(T[i] <= self.TAUS)
+            out[p.id] = (float(self.TAUS[ok[0]]), path[ok[0]]) if len(ok) else (2.0 + float(T[i, -1]), path[-1])
+        return out
+
     def _reach(self, p: Player, path: np.ndarray) -> tuple[float, np.ndarray]:
         """(how soon p can get a stick on the puck, where). On your skating model: from the way
         he's going now, stopping first if it's away from the puck, then pushing up to speed."""
@@ -1206,72 +1238,97 @@ class Game:
 
     def _skate(self, p: Player, target, dt: float, avoid=None) -> None:
         """Toward his target, inside his skating limits; `avoid`: requests to go round other AI
-        skaters and round you (_avoid), inside the same limits."""
-        old = p.pos.copy()
+        skaters and round you (_avoid), inside the same limits. (Plain floats: it runs for every
+        skater every tick.)"""
+        top = self._top if self._top is not None else self.vmax      # (this tick's: update works it out once)
+        px, pz = float(p.pos[0]), float(p.pos[1])
+        vx, vz = float(p.vel[0]), float(p.vel[1])
         live = target is not None and self.state == "live"
-        want, arriving = np.zeros(2), False
+        wx = wz = 0.0
+        arriving = False
         if live:
-            vmax = self.vmax * (CARRY if p is self.holder else 1.0)
+            vmax = top * (CARRY if p is self.holder else 1.0)
             pace = vmax                               # flat out on a read; else his cruise, or what keeps up with his man
-            near_you = (self.you is not None
-                        and _n(p.pos - self.you.pos) < BURST_CLEAR + 0.5 * _n(p.vel))
+            y = self.you
+            near_you = y is not None and math.hypot(px - y.pos[0], pz - y.pos[1]) < BURST_CLEAR + 0.5 * math.hypot(vx, vz)
             if p.id not in self.burst or near_you:
-                pace = self.cruise * self.vmax
+                pace = self.cruise * top
                 if p.id in self.keep:                 # following someone: his speed, a little more if behind
-                    gap = _n(np.asarray(target, dtype=float) - p.pos)
-                    pace = max(pace, _n(self._tvel.get(p.id, (0.0, 0.0))) + 0.3 * min(1.0, gap / 2.0))
+                    gap = math.hypot(target[0] - px, target[1] - pz)
+                    tv = self._tvel.get(p.id, (0.0, 0.0))
+                    pace = max(pace, math.hypot(tv[0], tv[1]) + 0.3 * min(1.0, gap / 2.0))
                 pace = min(vmax, pace)
-            target = self._round_nets(p.pos, self._off_nets(np.asarray(target, dtype=float)))
-            to = target - p.pos
-            dist = _n(to)
+            tg = self._round_nets(p.pos, self._off_nets(np.asarray(target, dtype=float)))
+            tox, toz = float(tg[0]) - px, float(tg[1]) - pz
+            dist = math.hypot(tox, toz)
             if self.skate_like_you:                   # his braking takes ARRIVE/JERK to build: start that early
-                lead = _n(p.vel) * ARRIVE / JERK
+                lead = math.hypot(vx, vz) * ARRIVE / JERK
                 arrive = math.sqrt(2 * 0.8 * ARRIVE * max(dist - lead, 0.0))
             else:
                 arrive = math.sqrt(2 * ACCEL * dist)
             arriving = arrive < pace
-            want = unit(to) * min(pace, arrive)
+            if dist > 1e-9:
+                w = min(pace, arrive) / dist
+                wx, wz = tox * w, toz * w
             if self.steady:                           # going round people, eased in and out
-                a, b = (np.zeros(2), np.zeros(2)) if avoid is None else (avoid[0] * vmax, avoid[1] * vmax)
-                u = unit(want)
-                back = float(a @ u)
+                if avoid is None:
+                    ax = az = bx = bz = 0.0
+                else:
+                    ax, az = float(avoid[0][0]) * vmax, float(avoid[0][1]) * vmax
+                    bx, bz = float(avoid[1][0]) * vmax, float(avoid[1][1]) * vmax
+                wn = math.hypot(wx, wz)
+                ux, uz = (wx / wn, wz / wn) if wn > 1e-9 else (0.0, 0.0)
+                back = ax * ux + az * uz
                 if back < 0:                          # another AI: never brake against where he's going, step round
-                    a = a - back * u
-                a = a + b                             # you: he may also slow for you
-                f = self._avoid_f.get(p.id, np.zeros(2))
-                f = f + (a - f) * min(1.0, dt / AVOID_EASE)
-                self._avoid_f[p.id] = f
-                want = _cap(want + f, pace)            # (going round someone is no reason to go faster)
+                    ax, az = ax - back * ux, az - back * uz
+                ax, az = ax + bx, az + bz             # you: he may also slow for you
+                fx, fz = self._avoid_f.get(p.id, (0.0, 0.0))
+                k = min(1.0, dt / AVOID_EASE)
+                fx, fz = fx + (ax - fx) * k, fz + (az - fz) * k
+                self._avoid_f[p.id] = (fx, fz)
+                wx, wz = wx + fx, wz + fz
+                m = math.hypot(wx, wz)
+                if m > pace:                          # (going round someone is no reason to go faster)
+                    wx, wz = wx * (pace / m), wz * (pace / m)
         if self.skate_like_you:
-            self._drive(p, want, arriving, GLIDE if self.state == "live" else STOP, dt)
+            vx, vz = self._drive(p, vx, vz, wx, wz, arriving, GLIDE if self.state == "live" else STOP, dt)
         elif not live:
-            p.vel = p.vel * max(0.0, 1 - 4 * dt)
+            k = max(0.0, 1 - 4 * dt)
+            vx, vz = vx * k, vz * k
         else:                                         # the old way: one 5 m/s^2 cap, any direction
-            dv = want - p.vel
-            n = _n(dv)
+            dvx, dvz = wx - vx, wz - vz
+            n = math.hypot(dvx, dvz)
             if n > ACCEL * dt:
-                dv *= ACCEL * dt / n
-            p.vel = p.vel + dv
-        free = p.pos + p.vel * dt
-        p.pos = self._off_nets(self.arena.keep_on_ice(free, 0.45))
+                dvx, dvz = dvx * (ACCEL * dt / n), dvz * (ACCEL * dt / n)
+            vx, vz = vx + dvx, vz + dvz
+        fx, fz = px + vx * dt, pz + vz * dt
+        pos = self._off_nets(self.arena.keep_on_ice((fx, fz), 0.45))
+        nx, nz = float(pos[0]), float(pos[1])
         if self.steady:                               # the boards or a net stopped him: no pushing on into them
-            fix = p.pos - free
-            n = _n(fix)
+            cx, cz = nx - fx, nz - fz
+            n = math.hypot(cx, cz)
             if n > 1e-9:
-                into = float(p.vel @ fix) / n
+                into = (vx * cx + vz * cz) / n
                 if into < 0:
-                    p.vel = p.vel - into * fix / n
-        p.stride += _n(p.pos - old)
-        speed = _n(p.vel)
+                    vx, vz = vx - into * cx / n, vz - into * cz / n
+        p.pos, p.vel = pos, np.array([vx, vz])
+        p.stride += math.hypot(nx - px, nz - pz)
+        speed = math.hypot(vx, vz)
+        ffx, ffz = float(p.facing[0]), float(p.facing[1])
         if p is self.holder or speed > 1.0:
-            want = unit(p.vel) if speed > 0.5 else p.facing
+            gx, gz = (vx / speed, vz / speed) if speed > 0.5 else (ffx, ffz)
         else:
-            pxz, _ = self._puck()
-            want = unit(pxz - p.pos)
-        if np.any(want):
-            was = p.facing
-            p.facing = unit(p.facing + min(1.0, 8.0 * dt) * (want - p.facing))
-            p.turn = math.degrees(math.atan2(was[0] * p.facing[1] - was[1] * p.facing[0], float(was @ p.facing))) / dt
+            q = self._pxz if self._pxz is not None else self._puck()[0]
+            dx, dz = float(q[0]) - nx, float(q[1]) - nz
+            n = math.hypot(dx, dz)
+            gx, gz = (dx / n, dz / n) if n > 1e-9 else (0.0, 0.0)
+        if gx or gz:
+            k = min(1.0, 8.0 * dt)
+            hx, hz = ffx + k * (gx - ffx), ffz + k * (gz - ffz)
+            n = math.hypot(hx, hz)
+            hx, hz = (hx / n, hz / n) if n > 1e-9 else (0.0, 0.0)
+            p.facing = np.array([hx, hz])
+            p.turn = math.degrees(math.atan2(ffx * hz - ffz * hx, ffx * hx + ffz * hz)) / dt
 
     @staticmethod
     def _crosses(a, b, x0: float, x1: float, z0: float, z1: float) -> bool:
@@ -1297,7 +1354,15 @@ class Game:
         go round it, not into its front)."""
         hw, front, back = zn.NET_HALF_W + zn.POST_R + m, zn.GOAL_Z + m, zn.GOAL_Z - zn.NET_DEPTH - m
         c = 0.3
+        L = self.arena.length
+        qx, qz, tx, tz = float(q[0]), float(q[1]), float(target[0]), float(target[1])
         for k in self.keepers.values():
+            if k.end == "home":
+                ax, az, bx, bz = qx, qz, tx, tz
+            else:
+                ax, az, bx, bz = -qx, L - qz, -tx, L - tz
+            if (max(az, bz) <= back or min(az, bz) >= front or max(ax, bx) <= -hw or min(ax, bx) >= hw):
+                continue                              # nowhere near this net
             a, b = k.frame(q), k.frame(target)
             if not self._crosses(a, b, -hw, hw, back, front):
                 continue
@@ -1317,7 +1382,12 @@ class Game:
     def _off_nets(self, q, m: float = 0.35) -> np.ndarray:
         """A point pushed out of both nets (by m): skaters go round them, not through."""
         front, back, hw = zn.GOAL_Z, zn.GOAL_Z - zn.NET_DEPTH, zn.NET_HALF_W + zn.POST_R
+        L = self.arena.length
         for k in self.keepers.values():
+            qx, qz = float(q[0]), float(q[1])
+            fx, fz = (qx, qz) if k.end == "home" else (-qx, L - qz)
+            if not (abs(fx) < hw + m and back - m < fz < front + m):
+                continue                              # not in this net
             f = k.frame(q)
             if abs(f[0]) < hw + m and back - m < f[1] < front + m:
                 dx, dfront, dback = hw + m - abs(f[0]), front + m - f[1], f[1] - (back - m)
@@ -1331,60 +1401,69 @@ class Game:
                 q = k.frame(f)
         return np.asarray(q, dtype=float)
 
-    def _drive(self, p: Player, want, arriving: bool, rest: float, dt: float) -> None:
-        """Your skating model for an AI skater (change 6; rig.Drive's rules): toward the velocity
-        `want` he pushes at up to PUSH, easing in over EASE, and bends his path at up to CARVE (with
-        the edges' grip shared between the two); slowing to arrive he brakes at up to ARRIVE, and
-        wanting to go more than STOP_ANGLE from where he's going is a hockey stop at STOP. With
-        nothing to go for he slows at `rest` (GLIDE: coasting; STOP: play has stopped). His
-        acceleration builds at JERK, so a push never starts as a step."""
-        v = p.vel
-        speed = _n(v)
-        want = np.asarray(want, dtype=float)
-        want_s = _n(want)
-        u = v / speed if speed > 1e-9 else np.zeros(2)
+    def _drive(self, p: Player, vx: float, vz: float, wx: float, wz: float, arriving: bool, rest: float,
+               dt: float) -> tuple[float, float]:
+        """Your skating model for an AI skater (change 6; rig.Drive's rules): from his velocity
+        (vx, vz) toward the velocity (wx, wz) he wants, he pushes at up to PUSH, easing in over EASE,
+        and bends his path at up to CARVE (with the edges' grip shared between the two); slowing to
+        arrive he brakes at up to ARRIVE, and wanting to go more than STOP_ANGLE from where he's
+        going is a hockey stop at STOP. With nothing to go for he slows at `rest` (GLIDE: coasting;
+        STOP: play has stopped). His acceleration builds at JERK, so a push never starts as a step.
+        Returns his new velocity; sets p.acc and p.mode."""
+        speed = math.hypot(vx, vz)
+        want_s = math.hypot(wx, wz)
+        ux, uz = (vx / speed, vz / speed) if speed > 1e-9 else (0.0, 0.0)
         if want_s < 1e-9:                             # nothing to go for (or he's there): slow to rest
             rate = ARRIVE if arriving else rest
             p.mode = "coast" if rate == GLIDE else "stop"
-            a = -u * min(rate, speed / dt)
-        elif speed > STOP_DONE and float(want @ v) < math.cos(math.radians(STOP_ANGLE)) * want_s * speed:
+            a = min(rate, speed / dt)
+            ax, az = -ux * a, -uz * a
+        elif speed > STOP_DONE and wx * vx + wz * vz < _COS_STOP * want_s * speed:
             p.mode = "stop"
-            a = -u * STOP
+            ax, az = -ux * STOP, -uz * STOP
         elif speed < STOP_DONE:                       # from (nearly) still: straight at it
             p.mode = "push"
-            dv = want - v
-            n = _n(dv)
-            a = dv / n * min(PUSH, n / EASE) if n > 1e-9 else np.zeros(2)
+            dvx, dvz = wx - vx, wz - vz
+            n = math.hypot(dvx, dvz)
+            if n > 1e-9:
+                a = min(PUSH, n / EASE) / n
+                ax, az = dvx * a, dvz * a
+            else:
+                ax = az = 0.0
         else:
             p.mode = "push"
-            dv = want - v
-            along = float(dv @ u)
-            across = dv - along * u
+            dvx, dvz = wx - vx, wz - vz
+            along = dvx * ux + dvz * uz
+            cx, cz = dvx - along * ux, dvz - along * uz
             if along >= 0:
                 a_al = min(PUSH, along / EASE)
             elif arriving:                            # slowing to get there
                 a_al = -min(ARRIVE, -along / EASE)
-            elif float(want @ v) > 0:                 # wants a little less speed: coasts down to it
+            elif wx * vx + wz * vz > 0:               # wants a little less speed: coasts down to it
                 a_al = -min(GLIDE, -along / EASE)
                 p.mode = "coast"
             else:
                 a_al = -min(PUSH, -along / EASE)
-            n_x = _n(across)
+            n_x = math.hypot(cx, cz)
             a_x = min(CARVE, n_x / EASE)
             grip = max(PUSH, CARVE)
             a_al = math.copysign(min(abs(a_al), math.sqrt(max(grip * grip - a_x * a_x, 0.0))), a_al)
-            a = u * a_al + (across / n_x * a_x if n_x > 1e-9 else 0.0)
-        da = a - p.acc
-        n = _n(da)
+            ax, az = ux * a_al, uz * a_al
+            if n_x > 1e-9:
+                ax, az = ax + cx / n_x * a_x, az + cz / n_x * a_x
+        cax, caz = float(p.acc[0]), float(p.acc[1])
+        dax, daz = ax - cax, az - caz
+        n = math.hypot(dax, daz)
         if n > JERK * dt:
-            da = da * (JERK * dt / n)
-        p.acc = p.acc + da
-        new = v + p.acc * dt
-        if p.mode in ("stop", "coast") and float(new @ v) <= 0.0:   # a stop ends at rest; it doesn't push him back
-            new, p.acc = np.zeros(2), np.zeros(2)
-        if not new.any() and want_s < 1e-9:
+            dax, daz = dax * (JERK * dt / n), daz * (JERK * dt / n)
+        cax, caz = cax + dax, caz + daz
+        nvx, nvz = vx + cax * dt, vz + caz * dt
+        if p.mode in ("stop", "coast") and nvx * vx + nvz * vz <= 0.0:   # a stop ends at rest; it doesn't push him back
+            nvx = nvz = cax = caz = 0.0
+        if nvx == 0.0 and nvz == 0.0 and want_s < 1e-9:
             p.mode = "still"
-        p.vel = new
+        p.acc = np.array([cax, caz])
+        return nvx, nvz
 
     def _avoid(self) -> dict[str, np.ndarray]:
         """Steering round people (change 5): for each AI skater, (from the other AI, from you): a
