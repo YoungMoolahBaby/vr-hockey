@@ -13,7 +13,7 @@ def test_a_short_self_play_game_is_recorded_and_scored(tmp_path):
     assert {"rink", "drop", "take", "pass"} <= kinds
     assert sm.runs_in(tmp_path) == [tmp_path / "s1"]
     R = sm.score(sm.runs_in(tmp_path))
-    assert R["games"] == 1 and abs(R["vmax"] - 0.95 * 3.0) < 1e-6
+    assert R["games"] == 1 and abs(R["vmax"] - 0.95 * 4.5) < 1e-6    # 0.95 of your sprint
     assert R["counts"]["passes"] >= 1 and R["counts"]["touches"] > 5
     assert 0.0 <= R["completion"] <= 1.0 and 0.0 < R["mean_speed"] <= 1.0
     assert 0.9 < R["carry_p90"] <= 1.0                      # a carrier skates at 0.95 of the top (coasting down to it)

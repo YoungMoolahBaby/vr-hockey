@@ -8,7 +8,7 @@
     uv run python selfplay_metrics.py data/selfplay-20261113-160000 --json out.json   # read again; save the numbers
 
 Self-play: all six skaters are AI, with the real 1 kHz puck, and the AI is capped as in the headset
-(0.95 of your skate speed, --you-ms, default 3 m/s: Jon's setting). Each game is written the way
+(0.95 of your sprint speed, --you-sprint, default 4.5 m/s: Jon's setting). Each game is written the way
 game.py records one (ai.csv every AI tick, the game's log items in events.jsonl) to
 data/selfplay-<time>/s<seed>/, then read back, so self-play and your games are scored by the same code.
 
@@ -42,7 +42,8 @@ import threes as th
 import zone as zn
 
 HERE = Path(__file__).resolve().parent
-YOU_MS = 3.0             # m/s: Jon's skate setting; the AI's top is 0.95 of it, as in the headset
+YOU_MS = 3.0             # m/s: Jon's skate setting (his cruise) ...
+YOU_SPRINT = 4.5         # m/s: ... and his sprint: the AI's top is 0.95 of the faster, as in the headset
 
 # reports/Lifelike AI players.md, section 4: (baseline, target). The baseline is four 600 s self-play
 # games (seeds 0-3) at an AI top of 2.85 m/s, level 1, on main at 7d9ad8c.
@@ -66,6 +67,8 @@ TABLE = [
     ("mean_speed", "Mean speed / top", 0.844, "0.40-0.55", "f2"),
     ("ge90", "Time at >= 90% of top", 0.638, "<= 10%", "pct"),
     ("standing", "Standing (< 0.3 m/s)", 0.018, "10-20%", "pct"),
+    ("gliding", "Gliding (coasting: no push)", 0.0, "20-30%", "pct"),
+    ("bursting", "Going flat out on a read", None, "", "pct"),
     ("backward", "Skating backward (facing > 120 deg off travel, moving)", 0.0039, "8-15%", "pct1"),
     ("carry_p90", "Carry speed p90 / top", 0.85, "0.95", "f2"),
     ("missed_catch", "Intercepted passes after a missed catch", 0.427, "< 15%", "pct"),
@@ -105,14 +108,14 @@ def _plain(x):
 
 # ----------------------------------------------------------------------------- self-play
 
-def make_game(seed: int, you_ms: float = YOU_MS):
+def make_game(seed: int, you_ms: float = YOU_MS, you_sprint: float = YOU_SPRINT):
     """All six skaters AI, the real puck physics (as tests/test_threes.py's make())."""
     params = pk.Params()
     rink = ar.Arena(zn.Zone(np.array([3.0, 0.0, -1.0]), np.array([0.6, 0.0, -0.8])))
     sim = pk.Sim(params, pk.Rink(), 70)
     sim.puck = ar.ArenaPuck(params, rink)
     game = th.Game(rink, sim.puck, np.random.default_rng(seed), to_goals=99, you=False)
-    game.you_ms = you_ms
+    game.you_ms, game.you_sprint = you_ms, you_sprint
     return sim, game
 
 
@@ -124,7 +127,8 @@ def _value(s: str):
 
 def play_one(job: tuple) -> dict:
     """One self-play game, recorded to `out` as ai.csv, events.jsonl and meta.json."""
-    seed, seconds, out, you_ms, sets = job
+    seed, seconds, out, you_ms, sets, *rest = job
+    you_sprint = rest[0] if rest else YOU_SPRINT
     for name, _ in sets:
         if not hasattr(th, name):
             raise SystemExit(f"threes.py has no {name}")
@@ -132,15 +136,15 @@ def play_one(job: tuple) -> dict:
     try:
         for name, value in sets:
             setattr(th, name, value)
-        return _play(seed, seconds, Path(out), you_ms, sets)
+        return _play(seed, seconds, Path(out), you_ms, sets, you_sprint)
     finally:
         for name, value in old.items():                # as it was (this may be the caller's process)
             setattr(th, name, value)
 
 
-def _play(seed: int, seconds: float, out: Path, you_ms: float, sets: list) -> dict:
+def _play(seed: int, seconds: float, out: Path, you_ms: float, sets: list, you_sprint: float = YOU_SPRINT) -> dict:
     out.mkdir(parents=True, exist_ok=True)
-    sim, g = make_game(seed, you_ms)
+    sim, g = make_game(seed, you_ms, you_sprint)
     ticks = []
     wall = time.perf_counter()
     with open(out / "ai.csv", "w", encoding="utf-8") as ai, open(out / "events.jsonl", "w", encoding="utf-8") as ev:
@@ -163,7 +167,7 @@ def _play(seed: int, seconds: float, out: Path, you_ms: float, sets: list) -> di
                     ev.write(json.dumps({"t": round(t, 4), "event": item[1], **item[2]}, default=_plain) + "\n")
             g.outbox.clear()
     ms = np.array(ticks) * 1000
-    meta = {"kind": "selfplay", "seed": seed, "seconds": seconds, "you_ms": you_ms,
+    meta = {"kind": "selfplay", "seed": seed, "seconds": seconds, "you_ms": you_ms, "you_sprint": you_sprint,
             "set": {k: v for k, v in sets}, "score": g.score, "stats": {k: v for k, v in g.stats.items() if k != "goals"},
             "ai_tick_ms": [round(float(ms.mean()), 3), round(float(np.percentile(ms, 99)), 3)],
             "wall_s": round(time.perf_counter() - wall, 1)}
@@ -317,6 +321,10 @@ class Score:
             A["ticks"] += int(ok.sum())
             A["standing"] += int(np.sum(ok & (s < 0.3)))
             A["ge90"] += int(np.sum(ok & (s >= 0.9 * vm)))
+            if f"{ids[j]}_mode" in r.col:
+                A["coast"] += int(np.sum(ok & (r.s(f"{ids[j]}_mode") == "coast")))
+                A["burst"] += int(np.sum(ok & (r.s(f"{ids[j]}_go") == "1")))
+                A["mode_ticks"] += int(ok.sum())
             dv = np.diff(v, axis=0)
             gap = np.diff(t)
             acc = np.linalg.norm(dv, axis=1) / gap
@@ -536,6 +544,8 @@ class Score:
             "mean_speed": float(np.mean(self.cat("speed_frac"))),
             "ge90": A["ge90"] / max(A["ticks"], 1),
             "standing": A["standing"] / max(A["ticks"], 1),
+            "gliding": A["coast"] / A["mode_ticks"] if A["mode_ticks"] else None,
+            "bursting": A["burst"] / A["mode_ticks"] if A["mode_ticks"] else None,
             "backward": float(np.mean(self.cat("face_off") > 120)),
             "carry_p90": _pct(self.cat("carry_speed"), 90),
             "missed_catch": sum(1 for p in picked if p["fumbled"]) / max(len(picked), 1),
@@ -611,7 +621,9 @@ def main() -> None:
     ap.add_argument("runs", nargs="*", type=Path, help="recorded games to score (default: play self-play games)")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3])
     ap.add_argument("--seconds", type=float, default=600.0, help="each self-play game's length (default 600)")
-    ap.add_argument("--you-ms", type=float, default=YOU_MS, help="your skate speed: the AI's top is 0.95 of it (default 3)")
+    ap.add_argument("--you-ms", type=float, default=YOU_MS, help="your skate speed (default 3)")
+    ap.add_argument("--you-sprint", type=float, default=YOU_SPRINT,
+                    help="your sprint speed: the AI's top is 0.95 of the faster of the two (default 4.5)")
     ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                     help="a threes.py constant for the self-play, e.g. --set CARRY=0.85 or --set BLADE_AT=0.75,0")
     ap.add_argument("--out", type=Path, help="where self-play games go (default data/selfplay-<time>)")
@@ -625,7 +637,7 @@ def main() -> None:
     else:
         sets = [(k, _value(v)) for k, v in (s.split("=", 1) for s in args.set)]
         out = args.out or HERE / "data" / ("selfplay-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
-        jobs = [(seed, args.seconds, str(out / f"s{seed}"), args.you_ms, sets) for seed in args.seeds]
+        jobs = [(seed, args.seconds, str(out / f"s{seed}"), args.you_ms, sets, args.you_sprint) for seed in args.seeds]
         print(f"self-play: {len(jobs)} game(s) of {args.seconds:.0f} s -> {out}" + (f"  set {dict(sets)}" if sets else ""),
               flush=True)
         workers = max(1, min(len(jobs), (os.cpu_count() or 4) - 2))

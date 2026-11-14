@@ -36,7 +36,8 @@ Soft hands are off by default, as everywhere (Jon, 2026-11-09: with the ice assi
 feels right; the soft hands' pull within 4 cm of the blade felt like a magnetic field). --magnet 0.7
 turns them back on: while your blade moves at handling speed, a puck on it rides the blade instead
 of flying off; swing faster than the shot release speed (relative to you, so skating doesn't count)
-and it comes off as hit. The other team is never faster than 95% of your skate speed.
+and it comes off as hit. Nobody on the ice is faster than 95% of your sprint speed, and they
+cruise at about half of that: flat out only on a read (a loose puck, a pass, a man past them, open ice).
 
 The game is threes.py (the AI and the rules), arena.py (the rink), goalie.py (the goalies).
 Recorded to data/game-<timestamp>/ like the sandbox: every take, pass, shot, save and goal in
@@ -197,6 +198,8 @@ class GameMode(sandbox.SandboxMode):
                 head = (zone.xz(ph), zone.dir_to_zone(-Rh[:, 2]))
             blade = zone.xz(blade_world) if blade_world is not None and gripping else None
             g.you_ms = self.play.tuning.values["skate"]
+            g.you_sprint = self.play.tuning.values.get("sprint", 0.0)
+            g.cruise = self.play.tuning.values.get("cruise", threes.CRUISE)
             g.react = self.play.tuning.values.get("react", threes.REACT_S)
             g.steady = self.play.tuning.values.get("steady", 1.0) > 0
             g.skate_like_you = self.play.tuning.values.get("aiskate", 1.0) > 0

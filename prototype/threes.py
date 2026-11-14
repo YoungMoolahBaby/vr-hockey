@@ -35,6 +35,9 @@ The AI, 50 times a second:
   where a skater is going is blended out over about a quarter second (_smooth).
 - skating: your skating model (_drive: push, glide, hockey stop, turn limit, as rig.Drive), its
   push building over about 0.15 s; they steer round each other and round you (_avoid).
+- pace: top speed 0.95 of your sprint; they cruise at CRUISE of it and go flat out on a read
+  (self.burst: a close race for a loose puck, a pass they can't reach cruising, a man past them,
+  open ice for the carrier), never within BURST_CLEAR of your head.
 - the goalies (goalie.py; the far one in his end's own frame) track and save: a rebound, or he
   covers it and plays it to a teammate a second later.
 """
@@ -53,7 +56,13 @@ import puck as pk
 import zone as zn
 
 AI_DT = 0.02             # s: the AI's tick
-VMAX, ACCEL = 5.8, 5.0   # rec skaters (and never faster than YOU_FRAC of your own top speed); ACCEL: the old single cap
+VMAX, ACCEL = 5.8, 5.0   # rec skaters (and never faster than YOU_FRAC of your sprint speed); ACCEL: the old single cap
+CRUISE = 0.55            # of their top: their pace when nothing calls for more (the "AI cruising pace" setting; 1: flat out)
+BURST_CLEAR = 1.5        # m: nobody bursts within this of your head (plus half a second of his speed: looking ahead)
+BURST_GAP = 6.0          # m: a carrier with no defender goal side of him within this goes for the net flat out
+BACKCHECK_M = 1.0        # m: a defender whose man is this much nearer our net than he is gets back flat out
+RACE_S = 1.0             # s: a loose puck is a race (flat out) if the two teams' chasers are this close in time
+LANE_REACT = 0.15        # s: a defender's start on a pass, before his push (lane_odds)
 PUSH, GLIDE, STOP, CARVE = 6.0, 1.5, 8.0, 6.0   # m/s^2: your skating limits (sandbox.py's defaults, rig.Drive): theirs too
 ARRIVE = 0.7 * STOP      # m/s^2: a skater slows to arrive where he's going at this (a little gentler than a stop)
 JERK = 40.0              # m/s^3: his push (or stop) builds this fast: 6 m/s^2 over 0.15 s, never a step
@@ -140,13 +149,14 @@ def blade_point(pos, facing, shoots: str) -> np.ndarray:
 
 def lane_odds(a, b, opps, speed: float, reach: float, vmax: float) -> float:
     """The chance a puck from a to b at `speed` gets past every opponent (at the positions `opps`)
-    whose stick reaches `reach` and who skates at up to `vmax`."""
+    whose stick reaches `reach` and who skates at up to `vmax`: after LANE_REACT he pushes off
+    from standing (your skating model), as time_to."""
     a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
     p = 1.0
     for o in opps:
         d, s = seg_dist(np.asarray(o, dtype=float), a, b)
         t_puck = s / speed
-        t_opp = max(0.0, d - reach) / vmax + 0.25
+        t_opp = float(time_to(max(0.0, d - reach), 0.0, vmax)) + LANE_REACT
         p *= float(gl.sig((t_opp - t_puck) / 0.12))
     return p
 
@@ -359,7 +369,13 @@ class Game:
         self.arena, self.puck = arena, puck
         self.rng = rng if rng is not None else np.random.default_rng()
         self.to_goals, self.level = to_goals, level
-        self.you_ms: float | None = None         # your top speed (the skate speed setting): they're never faster
+        self.you_ms: float | None = None         # your cruising speed (the skate speed setting) ...
+        self.you_sprint: float | None = None     # ... and your sprint (the sprint speed setting): they're never faster
+        self.cruise = CRUISE                     # their pace, as a share of their top (the "AI cruising pace" setting)
+        self.burst: set[str] = set()             # who is going flat out this tick (a read: _targets)
+        self.keep: set[str] = set()              # who keeps pace with a moving target (a man, the carrier)
+        self._held_go: dict[str, bool] = {}      # ... as each was when his target was last taken in (_react)
+        self._tvel: dict[str, np.ndarray] = {}   # how fast each one's target is moving (_smooth)
         self.react = REACT_S                     # their reaction time (the "AI reaction" setting; 0: at once)
         self.steady = STEADY                     # the "steady AI skaters" setting (off: as before changes 4-5)
         self.skate_like_you = SKATE_LIKE_YOU     # the "AI skating" setting (off: the old single 5 m/s^2 cap)
@@ -404,7 +420,8 @@ class Game:
 
     @property
     def vmax(self) -> float:
-        top = VMAX if self.you_ms is None else min(VMAX, YOU_FRAC * self.you_ms)
+        you = None if self.you_ms is None else max(self.you_ms, self.you_sprint or 0.0)
+        top = VMAX if you is None else min(VMAX, YOU_FRAC * you)
         return top * (0.85 + 0.15 * self.level)
 
     # ------------------------------------------------------------------ the tick
@@ -891,6 +908,10 @@ class Game:
         spring with a SMOOTH_HALF half-life on the jump). A target that moves smoothly (a man he
         marks, a spot moving with the carrier) is followed exactly, with no lag."""
         if not self.steady:
+            for pid, tg in targets.items():
+                prev = self._steer.get(pid)
+                step = None if prev is None else np.asarray(tg, dtype=float) - prev
+                self._tvel[pid] = step / dt if step is not None and _n(step) <= JUMP_M else np.zeros(2)
             self._raw_prev, self._off, self._offv = {}, {}, {}
             self._steer = {pid: np.asarray(tg, dtype=float) for pid, tg in targets.items()}
             return dict(self._steer)
@@ -907,6 +928,7 @@ class Game:
                 off = (last - raw) if last is not None else np.zeros(2)
             elif _n(raw - prev) > JUMP_M:
                 off = off + (prev - raw)              # it jumped: start from where he was going
+            self._tvel[pid] = (raw - prev) / dt if prev is not None and _n(raw - prev) <= JUMP_M else np.zeros(2)
             j1 = offv + off * y
             off, offv = e * (off + j1 * dt), e * (offv - j1 * y * dt)
             self._raw_prev[pid], self._off[pid], self._offv[pid] = raw, off, offv
@@ -938,15 +960,26 @@ class Game:
                 extra = REACT_BEHIND if c < behind else (REACT_SIDE if c < side else 0.0)
                 self._react_at[p.id] = self.t + base + float(self.rng.exponential(REACT_TAIL)) + extra
         self._poss_key, self._actor = key, None
+        go = set()
         for pid, tg in targets.items():
             if self.t < self._react_at.get(pid, -1.0) and pid in self._held:
-                targets[pid] = self._held[pid]
+                targets[pid] = self._held[pid]        # (and his pace, as it was)
+                if self._held_go.get(pid):
+                    go.add(pid)
             else:
                 self._held[pid] = np.asarray(tg, dtype=float).copy()
+                self._held_go[pid] = pid in self.burst
+                if pid in self.burst:
+                    go.add(pid)
+        self.burst = go
         return targets
 
     def _targets(self, pxz, pv) -> dict[str, np.ndarray]:
+        """Where each AI skater's role sends him; self.burst: who goes flat out (cruise and burst,
+        change 7): a loose puck's chasers, a pass's receiver, a defender beaten by his man, and a
+        carrier with nobody goal side of him. Everyone else cruises."""
         h = self.holder
+        self.burst, self.keep = set(), set()
         out: dict[str, np.ndarray] = {}
         if isinstance(h, Player) or self.yours:
             carrier = h if isinstance(h, Player) else self.you
@@ -971,11 +1004,17 @@ class Game:
         if _n(slot - h.pos) < 2.0:             # in the slot: cut across
             slot = net + np.array([-side * 2.5, -toward * 5.0])
         push = np.zeros(2)
+        mine = _n(h.pos - net)
+        open_ice = True
         for o in self.team(OTHER[h.team]):
             d = o.pos - h.pos
             n = _n(d)
             if n < 3.5:
                 push -= unit(d) * (3.5 - n) * 1.4
+            if n < BURST_GAP and _n(o.pos - net) < mine:
+                open_ice = False                  # a defender goal side of him: patience
+        if open_ice:
+            self.burst.add(h.id)                  # he has beaten them: go
         return slot + push
 
     def _support(self, carrier, out: dict, team: str | None = None, near=None) -> None:
@@ -1004,6 +1043,8 @@ class Game:
         if (self.steady and len(set(now)) == len(now) and all(n in spots for n in now)
                 and cost(best) > SPOT_BETTER * cost(now)):
             best = now                                             # ... another way is 20% shorter
+        if carrier is not None:
+            self.keep.update(p.id for p in mates)
         for p, n in zip(mates, best):
             self._spot_of[p.id] = n
             out[p.id] = spots[n]
@@ -1042,6 +1083,10 @@ class Game:
                 self.outbox.append(("log", "switch", {"team": team, "a": d.id, "to": carrier.id}))
         for d in mine:
             a = by.get(self.marks.get(d.id))
+            if a is not None:
+                self.keep.add(d.id)
+            if a is not None and _n(a.pos - net) < _n(d.pos - net) - BACKCHECK_M:
+                self.burst.add(d.id)                  # his man is past him: get back
             if a is None:
                 out[d.id] = net + unit(np.array([0.0, self.arena.mid]) - net) * 4.0
                 continue
@@ -1056,6 +1101,7 @@ class Game:
         """A loose puck: each team's quickest skater goes for it; the others pick up a man or
         get to the back door."""
         path = self._path(pxz, pv)
+        when: dict[str, float] = {}                   # each team's chaser: how soon he gets there
         for team in ("us", "them"):
             cands = [p for p in self.players if p.team == team]
             if not cands:
@@ -1074,6 +1120,14 @@ class Game:
             if chaser is not None:
                 out[chaser.id] = times[chaser.id][1]
                 self.chasers[team] = chaser.id
+                when[team] = times[chaser.id][0]
+                if self.pass_to == chaser.id:         # a pass to him: flat out only if his cruise won't get him there
+                    tau, q = times[chaser.id]
+                    rel = q - chaser.pos
+                    d = _n(rel)
+                    v0 = float(rel @ chaser.vel) / max(d, 1e-6)
+                    if float(time_to(max(0.0, d - STICK_R), v0, self.cruise * self.vmax)) + 0.1 > tau + 0.05:
+                        self.burst.add(chaser.id)
             rest = [p for p in cands if p is not chaser]
             net_own = self.arena.net(defend_end(team))
             net_att = self.arena.net(attack_end(team))
@@ -1090,6 +1144,13 @@ class Game:
                     out[p.id] = pxz + 0.45 * (net_own - pxz)
                 else:                                 # the other gets open up ice
                     out[p.id] = pxz + 0.35 * (net_att - pxz) + np.array([open_x, 0.0])
+        self._races(when)
+
+    def _races(self, when: dict) -> None:
+        """A loose puck is a race only if the two chasers are close in time (RACE_S): then both go
+        flat out. One clearly first, or one alone, gets there at his cruise."""
+        if len(when) == 2 and abs(when["us"] - when["them"]) < RACE_S:
+            self.burst.update(self.chasers.values())
 
     TAUS = np.arange(0.0, 2.01, 0.1)
 
@@ -1124,6 +1185,15 @@ class Game:
         want, arriving = np.zeros(2), False
         if live:
             vmax = self.vmax * (CARRY if p is self.holder else 1.0)
+            pace = vmax                               # flat out on a read; else his cruise, or what keeps up with his man
+            near_you = (self.you is not None
+                        and _n(p.pos - self.you.pos) < BURST_CLEAR + 0.5 * _n(p.vel))
+            if p.id not in self.burst or near_you:
+                pace = self.cruise * self.vmax
+                if p.id in self.keep:                 # following someone: his speed, a little more if behind
+                    gap = _n(np.asarray(target, dtype=float) - p.pos)
+                    pace = max(pace, _n(self._tvel.get(p.id, (0.0, 0.0))) + 0.3 * min(1.0, gap / 2.0))
+                pace = min(vmax, pace)
             target = self._round_nets(p.pos, self._off_nets(np.asarray(target, dtype=float)))
             to = target - p.pos
             dist = _n(to)
@@ -1132,8 +1202,8 @@ class Game:
                 arrive = math.sqrt(2 * 0.8 * ARRIVE * max(dist - lead, 0.0))
             else:
                 arrive = math.sqrt(2 * ACCEL * dist)
-            arriving = arrive < vmax
-            want = unit(to) * min(vmax, arrive)
+            arriving = arrive < pace
+            want = unit(to) * min(pace, arrive)
             if self.steady:                           # going round people, eased in and out
                 a, b = (np.zeros(2), np.zeros(2)) if avoid is None else (avoid[0] * vmax, avoid[1] * vmax)
                 u = unit(want)
@@ -1144,7 +1214,7 @@ class Game:
                 f = self._avoid_f.get(p.id, np.zeros(2))
                 f = f + (a - f) * min(1.0, dt / AVOID_EASE)
                 self._avoid_f[p.id] = f
-                want = _cap(want + f, vmax)
+                want = _cap(want + f, pace)            # (going round someone is no reason to go faster)
         if self.skate_like_you:
             self._drive(p, want, arriving, GLIDE if self.state == "live" else STOP, dt)
         elif not live:
@@ -1267,6 +1337,7 @@ class Game:
                 a_al = -min(ARRIVE, -along / EASE)
             elif float(want @ v) > 0:                 # wants a little less speed: coasts down to it
                 a_al = -min(GLIDE, -along / EASE)
+                p.mode = "coast"
             else:
                 a_al = -min(PUSH, -along / EASE)
             n_x = _n(across)
@@ -1378,7 +1449,7 @@ class Game:
                         a.vel = a.vel + (need - along) * u
 
     # ------------------------------------------------------------------ for the app
-    AI_COLS = ("x", "z", "vx", "vz", "fx", "fz", "bx", "bz", "tx", "tz", "rx", "rz", "mark")
+    AI_COLS = ("x", "z", "vx", "vz", "fx", "fz", "bx", "bz", "tx", "tz", "rx", "rz", "mark", "mode", "go")
 
     def ai_header(self) -> str:
         """ai.csv's header: the game, the puck, you, then each AI skater (position, velocity,
@@ -1411,6 +1482,7 @@ class Game:
             for tg in (self.targets.get(p.id), self.raw_targets.get(p.id)):
                 row += f(*tg) if tg is not None else ["", ""]
             row.append(self.marks.get(p.id, "") if self.state == "live" else "")
+            row += [p.mode, "1" if p.id in self.burst else ""]
         for k in (self.keepers["home"], self.keepers["far"]):
             row += f(*k.pos)
         return ",".join(row) + "\n"

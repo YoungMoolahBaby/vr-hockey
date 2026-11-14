@@ -228,6 +228,8 @@ get a line for each blade, as before. `gear.KIND = "ice"` puts them on the ice s
 - AI skating (`aiskate`, default like you; 0 = old): in the 3v3, the AI's push, glide, hockey stop
   and turn limit are your defaults (6, 1.5, 8 and 6 m/s²), its push builds instead of starting as a
   step, and it arrives without overshooting. Old: any change of velocity at up to 5 m/s², at once.
+- AI cruising pace (`cruise`, default 55% of their top; 100% = flat out everywhere, as before): in
+  the 3v3, how fast the AI skates when nothing calls for more.
 - ice assist (default 16 cm; 0 = off): a blade within this of the ice rests on it, everywhere.
   Nothing stops your hands at the ice, so you can't feel it. In the first free skate the blade
   hovered 2.5-30 cm up, and the puck slid under it at 70% of its crossings. From 16 to 32 cm the
@@ -369,8 +371,9 @@ You and two AI teammates (blue) against three (orange), with a goalie in each ne
   - Swing faster than the shot release speed (`--release`, default 4 m/s) and it comes off as
     hit. Skating doesn't count: speeds are taken relative to you.
   - It is `physics_core.cradle`, inside the 1 kHz step, so it adds no delay.
-- **The other team is never faster than 95% of your skate speed** (they were skating 5.8 m/s to
-  your 4).
+- **Nobody is faster than 95% of your sprint speed** (4.3 m/s at your 4.5; it was 95% of your skate
+  speed until 2026-11-13, so they could never burst). They cruise at about half that, below your
+  cruise, and go flat out only on a read (below).
 - Your teammates pass to you when you're open (a pass is led to your blade).
 - The other team marks you goal side and pokes at the puck while you carry it.
 - To get the puck back, get your stick on it or skate into their carrier. His puck rides on the
@@ -400,6 +403,12 @@ You and two AI teammates (blue) against three (orange), with a goalie in each ne
   and turn back with a hockey stop at 8 m/s², then push the new way. Who gets to a loose puck first
   counts the same: the way each is already going, a stop if it's the wrong way, then the push. The
   **"AI skating"** setting (`aiskate`: like you, or old) is the A/B: old is one 5 m/s² cap, any way.
+- **Cruise and burst:** they skate at their cruising pace (55% of their top, about 2.35 m/s) and go
+  flat out only on a read: a close race for a loose puck, a pass they can't reach at cruise, getting
+  back when their man is past them, or a carrier with nobody goal side of him. Defenders keep pace
+  with their men and supporters with the carrier. Nobody bursts within 1.5 m of your head (looking
+  half a second ahead). The **"AI cruising pace"** setting is the A/B (the report tries 50% and 65%;
+  100% is flat out everywhere, as before).
 - **Reactions:** when the puck changes hands, each skater reacts after his own reaction time
   (median about 0.3 s, longer if the puck was behind him). The new carrier, whoever made the play
   and a pass's receiver go at once. The "AI reaction time" setting, 0 = everyone at once.
@@ -507,4 +516,4 @@ Next: tuning, after the feel research (`../reports/`).
 | `selfplay_metrics.py` | the AI in numbers: self-play or a recorded game, scored against reports/Lifelike AI players.md |
 | `arena.py` | the whole rink: both ends from zone.py (the far one turned round), its puck (both nets), markings, the scoreboard |
 | `theme.py` | the look: a white rink aboard a mothership. Solid ice, boards, painted lines, the hull and a ring of light overhead, as triangles under the line drawing; the palette, given as the colours the headset shows |
-| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose; staggered reactions to a pass; jumps blended out, marks held, sides past the middle; skaters going round each other and round you without a jump; their push, stop and arrival inside your limits), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |
+| `tests/` | `uv run pytest`. They cover: the grab rules, exact and live = replay; the analysis recovering the synthetic truth; the puck physics; the zone (rims, our net); both drills driven by a bot; the goalie and expected goals; the skater drawing; the whole rink's puck (compiled = reference); the 3-on-3 played by the AI (a puck behind the net gets dug out; the carried puck on the drawn blade; your touch knocks it loose; staggered reactions to a pass; jumps blended out, marks held, sides past the middle; skaters going round each other and round you without a jump; their push, stop and arrival inside your limits; cruising, and no burst beside you), its log and metrics, and its app run headless; free skate and its goalies; thumbstick moves without jumps, the teleport, and the skating limits (push, glide, hockey stop, turn limit); the ice assist; air drag against its closed forms; the comfort check and the boards stopping you |

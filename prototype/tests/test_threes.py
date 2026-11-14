@@ -366,6 +366,39 @@ def test_an_ai_skater_pushes_off_stops_and_turns_inside_your_limits():
     assert abs(a.pos[1] - 14.0) < 0.3 and np.linalg.norm(a.vel) < 0.3       # and arrived
 
 
+def test_they_cruise_unless_a_read_calls_for_more_and_never_burst_beside_you():
+    """Top speed is 0.95 of your sprint; with nothing on they cruise at CRUISE of it; flat out
+    on a read (here: put in game.burst by hand), but not within BURST_CLEAR of your head."""
+    sim, game = make(you=True, seed=14)
+    game.you_ms, game.you_sprint = 3.0, 4.5
+    game.start()
+    play(sim, game, 2.5, head=(np.array([-8.0, 5.0]), np.array([0.0, 1.0])))
+    assert abs(game.vmax - 0.95 * 4.5) < 1e-9
+    a = game.by_id["T0"]
+    dt = threes.AI_DT
+
+    def skate_for(seconds, target, burst):
+        for _ in range(int(seconds / dt)):
+            game.burst, game.keep = ({"T0"} if burst else set()), set()
+            game._skate(a, target, dt)
+        return float(np.linalg.norm(a.vel))
+
+    a.pos, a.vel, a.acc = np.array([0.0, 8.0]), np.zeros(2), np.zeros(2)
+    far = np.array([0.0, 40.0])
+    assert abs(skate_for(3.0, far, False) - threes.CRUISE * game.vmax) < 0.05    # cruising
+    assert abs(skate_for(2.0, far, True) - game.vmax) < 0.05                     # a read: flat out
+    a.pos, a.vel, a.acc = np.array([-8.0, 3.0]), np.zeros(2), np.zeros(2)       # beside your head
+    game.you.pos, game.you.vel = np.array([-8.0, 5.0]), np.zeros(2)
+    game.burst = {"T0"}
+    peak = 0.0
+    for _ in range(int(0.6 / dt)):
+        game.burst, game.keep = {"T0"}, set()
+        game._skate(a, np.array([-8.0, 30.0]), dt)
+        if np.linalg.norm(a.pos - game.you.pos) < threes.BURST_CLEAR:
+            peak = max(peak, float(np.linalg.norm(a.vel)))
+    assert peak <= threes.CRUISE * game.vmax + 1e-6                             # no burst next to you
+
+
 def test_a_side_changes_past_the_middle_not_at_it():
     sim, game = make(seed=10)
     xs = [2.0, 0.5, -0.5, -1.0, -1.5, -0.5, 0.8, 1.3]
